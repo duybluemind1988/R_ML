@@ -630,6 +630,140 @@ gridExtra::grid.arrange(p1, p2, nrow = 1)
 
 
 ```{r}
+last_col_num<-ncol(df1) # last column number
+dim(df1) #2053 x 88
+df1[,(last_col_num-2):last_col_num]
+```
+5. No or little multicollinearity: Collinearity refers to the situation in which two or more predictor variables are closely related to one another. The presence of collinearity can pose problems in the OLS, since it can be difficult to separate out the individual effects of collinear variables on the response. In fact, collinearity can cause predictor variables to appear as statistically insignificant when in fact they are significant. This obviously leads to an inaccurate interpretation of coefficients and makes it difficult to identify influential predictors.
+
+In ames, for example, Garage_Area and Garage_Cars are two variables that have a correlation of 0.89 and both variables are strongly related to our response variable (Sale_Price). Looking at our full model where both of these variables are included, we see that Garage_Cars is found to be statistically significant but Garage_Area is not:
+
+```{r}
+# fit with two strongly correlated variables
+summary(cv_model3) %>%
+  broom::tidy() %>%
+  filter(term %in% c("Garage_Area", "Garage_Cars"))
+```
+
+```{r}
+#convert to data.frame
+as.data.frame(coef(summary(cv_model3))) %>% 
+  filter(term %in% c("Garage_Area", "Garage_Cars"))
+```
+
+
+```{r}
+#cannot filter unnamed column in R
+a<-as.data.frame(coef(summary(cv_model3)))
+a
+
+```
+```{r}
+# model without Garage_Area
+set.seed(123)
+mod_wo_Garage_Cars <- train(
+  Sale_Price ~ ., 
+  data = select(ames_train, -Garage_Cars), 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+summary(mod_wo_Garage_Cars) %>%
+  broom::tidy() %>%
+  filter(term == "Garage_Area")
+```
+
+#**4.6 Principal component regression**
+
+```{r}
+# perform 10-fold cross validation on a PCR model tuning the 
+# number of principal components to use as predictors from 1-100
+set.seed(123)
+cv_model_pcr <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 5),
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 100
+  )
+
+# model with lowest RMSE
+cv_model_pcr$bestTune
+##    ncomp
+## 97    97
+
+# results for model with lowest RMSE
+cv_model_pcr$results %>%
+  dplyr::filter(ncomp == pull(cv_model_pcr$bestTune))
+##   ncomp     RMSE  Rsquared      MAE   RMSESD RsquaredSD    MAESD
+## 1    97 30135.51 0.8615453 20143.42 5191.887 0.03764501 1696.534
+
+# plot cross-validated RMSE
+ggplot(cv_model_pcr)
+
+```
+
+
+
+#**4.7 Partial least squares**
+
+```{r}
+# perform 10-fold cross validation on a PLS model tuning the 
+# number of principal components to use as predictors from 1-30
+set.seed(123)
+cv_model_pls <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "pls",
+  trControl = trainControl(method = "cv", number = 5),
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 30
+)
+
+# model with lowest RMSE
+cv_model_pls$bestTune
+##    ncomp
+## 20    20
+
+# results for model with lowest RMSE
+cv_model_pls$results %>%
+  dplyr::filter(ncomp == pull(cv_model_pls$bestTune))
+##   ncomp     RMSE  Rsquared      MAE   RMSESD RsquaredSD   MAESD
+## 1    20 25459.51 0.8998194 16022.68 5243.478 0.04278512 1665.61
+
+# plot cross-validated RMSE
+ggplot(cv_model_pls)
+```
+#**4.8 Feature interpretation**
+The monotonic relationship means that a given predictor variable will always have a positive or negative relationship. But how do we determine the most influential variables?
+
+Variable importance seeks to identify those variables that are most influential in our model. For linear regression models, this is most often measured by the absolute value of the t-statistic for each model parameter used; though simple, the results can be hard to interpret when the model includes interaction effects and complex transformations (in Chapter 16 we’ll discuss model-agnostic approaches that don’t have this issue). For a PLS model, variable importance can be computed using the weighted sums of the absolute regression coefficients. The weights are a function of the reduction of the RSS across the number of PLS components and are computed separately for each outcome. Therefore, the contribution of the coefficients are weighted proportionally to the reduction in the RSS.
+```{r}
+vip(cv_model_pls, num_features = 20, method = "model")
+```
+
+
+```{r}
+#install.packages('pdp')
+library(pdp)
+pdp::partial(cv_model_pls, "Gr_Liv_Area", grid.resolution = 20, plot = TRUE)
+pdp::partial(cv_model_pls, "Total_Bsmt_SF", grid.resolution = 20, plot = TRUE)
+
+```
+#**4.9 Final thoughts**
+
+Linear regression is usually the first supervised learning algorithm you will learn. The approach provides a solid fundamental understanding of the supervised learning task; however, as we’ve discussed there are several concerns that result from the assumptions required. Although extensions of linear regression that integrate dimension reduction steps into the algorithm can help address some of the problems with linear regression, more advanced supervised algorithms typically provide greater flexibility and improved accuracy. Nonetheless, understanding linear regression provides a foundation that will serve you well in learning these more advanced methods.
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
 ```
 
 
@@ -644,4 +778,43 @@ gridExtra::grid.arrange(p1, p2, nrow = 1)
 ```{r}
 ```
 
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
 
