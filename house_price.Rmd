@@ -1,0 +1,647 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+## Chapter 3 Feature & Target Engineering
+**Library**
+```{r}
+#install.packages('AmesHousing')
+# Helper packages
+library(dplyr)    # for data manipulation
+library(ggplot2)  # for awesome graphics
+library(visdat)   # for additional visualizations
+# Feature engineering packages
+library(caret)    # for various ML tasks
+library(recipes)  # for feature engineering tasks
+# Modeling process packages
+library(rsample)   # for resampling procedures
+library(h2o)       # for resampling and model training
+# h2o set-up 
+#h2o.no_progress()  # turn off h2o progress bars
+#h2o.init()         # launch h2o
+```
+
+**Stratified sampling with the rsample package**
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+#**3.2 Target engineering**
+
+Option 1: normalize with a log transformation. This will transform most right skewed distributions to be approximately normal. One way to do this is to simply log transform the training and test set in a manual, single step manner similar to:
+
+However, we should think of the preprocessing as creating a blueprint to be re-applied strategically. For this, you can use the recipe package or something similar (e.g., caret::preProcess()). This will not return the actual log transformed values but, rather, a blueprint to be applied later.
+```{r}
+ames_recipe <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_log(all_outcomes())
+```
+Option 2: use a Box Cox transformation. A Box Cox transformation is more flexible than (but also includes as a special case) the log transformation and will find an appropriate transformation from a family of power transforms that will transform the variable as close as possible to a normal distribution (Box and Cox 1964; Carroll and Ruppert 1981). 
+
+#**3.3 Dealing with missingness**
+
+```{r}
+sum(is.na(AmesHousing::ames_raw)) #13997 so we will check in raw data
+sum(is.na(ames)) # 0
+```
+It is important to understand the distribution of missing values in a data set in order to determine the best approach for preprocessing. Heat maps are an efficient way to visualize the distribution of missing values for small- to medium-sized data sets. The code is.na(<data-frame-name>) will return a matrix of the same dimension as the given data frame, but each cell will contain either TRUE (if the corresponding value is missing) or FALSE (if the corresponding value is not missing). 
+```{r}
+#visual by ggplot
+AmesHousing::ames_raw %>%
+  is.na() %>%
+  reshape2::melt() %>%
+  ggplot(aes(Var2, Var1, fill=value)) + 
+  geom_raster() + 
+  coord_flip() +
+  scale_y_continuous(NULL, expand = c(0, 0)) +
+  scale_fill_grey(name = "", 
+                  labels = c("Present", 
+                             "Missing")) +
+  xlab("Observation") +
+  theme(axis.text.y  = element_text(size = 4))
+```
+
+```{r}
+# visual by vis_miss
+vis_miss(AmesHousing::ames_raw, cluster = TRUE)
+```
+
+#**3.3.2 Imputation**
+
+3.3.2.1 Estimated statistic
+An elementary approach to imputing missing values for a feature is to compute descriptive statistics such as the mean, median, or mode (for categorical) and use that value to replace 
+
+However, it is important to remember that imputation should be performed within the resampling process and as your data set gets larger, repeated model-based imputation can compound the computational demands. Thus, you must weigh the pros and cons of the two approaches. The following would build onto our ames_recipe and impute all missing values for the Gr_Liv_Area variable with the median value:
+```{r}
+ames_recipe %>%
+  step_medianimpute(Gr_Liv_Area)
+```
+An alternative is to use grouped statistics to capture expected values for observations that fall into similar groups. However, this becomes infeasible for larger data sets. Modeling imputation can automate this process for you and the two most common methods include K-nearest neighbor and tree-based imputation, which are discussed next.
+
+3.3.2.2 K-nearest neighbor
+K-nearest neighbor (KNN) imputes values by identifying observations with missing values, then identifying other observations that are most similar based on the other available features, and using the values from these nearest neighbor observations to impute missing values.
+
+We discuss KNN for predictive modeling in Chapter 8; the imputation application works in a similar manner. In KNN imputation, the missing value for a given observation is treated as the targeted response and is predicted based on the average (for quantitative values) or the mode (for qualitative values) of the k nearest neighbors.
+```{r}
+ames_recipe %>%
+  step_knnimpute(all_predictors(), neighbors = 6)
+```
+3.3.2.3 Tree-based
+As previously discussed, several implementations of decision trees (Chapter 9) and their derivatives can be constructed in the presence of missing values. Thus, they provide a good alternative for imputation. As discussed in Chapters 9-11, single trees have high variance but aggregating across many trees creates a robust, low variance predictor. Random forest imputation procedures have been studied (Shah et al. 2014; Stekhoven 2015); however, they require significant computational demands in a resampling environment (Kuhn and Johnson 2019). Bagged trees (Chapter 10) offer a compromise between predictive accuracy and computational burden.
+
+Similar to KNN imputation, observations with missing values are identified and the feature containing the missing value is treated as the target and predicted using bagged decision trees.
+
+```{r}
+ames_recipe %>%
+  step_bagimpute(all_predictors())
+```
+#**3.4 Feature filtering**
+
+Zero and near-zero variance variables are low-hanging fruit to eliminate. Zero variance variables, meaning the feature only contains a single unique value, provides no useful information to a model. Some algorithms are unaffected by zero variance features. However, features that have near-zero variance also offer very little, if any, information to a model. Furthermore, they can cause problems during resampling as there is a high probability that a given sample will only contain a single unique value (the dominant value) for that feature. A rule of thumb for detecting near-zero variance features is:
+
+The fraction of unique values over the sample size is low (say ≤10%).
+The ratio of the frequency of the most prevalent value to the frequency of the second most prevalent value is large (say ≥ 20%).
+
+If both of these criteria are true then it is often advantageous to remove the variable from the model. For the Ames data, we do not have any zero variance predictors but there are 20 features that meet the near-zero threshold.
+
+```{r}
+caret::nearZeroVar(ames_train, saveMetrics = TRUE) %>% 
+  tibble::rownames_to_column() %>% 
+  filter(nzv)
+```
+#**3.5 Numeric feature engineering**
+3.5.1 Skewness
+
+Similar to the process discussed to normalize target variables, parametric models that have distributional assumptions (e.g., GLMs, and regularized models) can benefit from minimizing the skewness of numeric features. When normalizing many variables, it’s best to use the Box-Cox (when feature values are strictly positive) or Yeo-Johnson (when feature values are not strictly positive) procedures as these methods will identify if a transformation is required and what the optimal transformation will be.
+
+
+
+```{r}
+# Normalize all numeric columns
+recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_YeoJohnson(all_numeric())   
+```
+3.5.2 Standardization
+
+For these models and modeling components, it is often a good idea to standardize the features. Standardizing features includes centering and scaling so that numeric variables have zero mean and unit variance, which provides a common comparable unit of measure across all the variables.
+
+Some packages (e.g., glmnet, and caret) have built-in options to standardize and some do not (e.g., keras for neural networks). However, you should standardize your variables within the recipe blueprint so that both training and test data standardization are based on the same mean and variance. This helps to minimize data leakage.
+```{r}
+ames_recipe %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
+```
+#**3.6 Categorical feature engineering**
+#3.6.1 Lumping
+
+Sometimes features will contain levels that have very few observations. For example, there are 28 unique neighborhoods represented in the Ames housing data but several of them only have a few observations.
+
+```{r}
+count(ames_train, Neighborhood) %>% arrange(n)
+```
+Even numeric features can have similar distributions. For example, Screen_Porch has 92% values recorded as zero (zero square footage meaning no screen porch) and the remaining 8% have unique dispersed values.
+
+```{r}
+count(ames_train, Screen_Porch) %>% arrange(n)
+```
+Sometimes we can benefit from collapsing, or “lumping” these into a lesser number of categories. In the above examples, we may want to collapse all levels that are observed in less than 10% of the training sample into an “other” category. We can use step_other() to do so. However, lumping should be used sparingly as there is often a loss in model performance (Kuhn and Johnson 2013).
+
+Tree-based models often perform exceptionally well with high cardinality features and are not as impacted by levels with small representation.
+
+```{r}
+# Lump levels for two features
+lumping <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_other(Neighborhood, threshold = 0.01, 
+             other = "other") %>%
+  step_other(Screen_Porch, threshold = 0.1, 
+             other = ">0")
+lumping
+```
+
+
+```{r}
+# Apply this blue print --> you will learn about this at 
+# the end of the chapter
+apply_2_training <- prep(lumping, training = ames_train) %>%
+  bake(ames_train)
+```
+
+
+```{r}
+# New distribution of Neighborhood
+count(apply_2_training, Neighborhood) %>% arrange(n)
+# New distribution of Screen_Porch
+count(apply_2_training, Screen_Porch) %>% arrange(n)
+```
+#3.6.2 One-hot & dummy encoding
+
+Many models require that all predictor variables be numeric. Consequently, we need to intelligently transform any categorical variables into numeric representations so that these algorithms can compute. Some packages automate this process (e.g., h2o and caret) while others do not (e.g., glmnet and keras). There are many ways to recode categorical variables as numeric (e.g., one-hot, ordinal, binary, sum, and Helmert).
+
+```{r}
+# Lump levels for two features
+recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_dummy(all_nominal(), one_hot = TRUE)
+
+```
+#3.6.3 Label encoding
+
+Label encoding is a pure numeric conversion of the levels of a categorical variable. If a categorical variable is a factor and it has pre-specified levels then the numeric conversion will be in level order. If no levels are specified, the encoding will be based on alphabetical order. For example, the MS_SubClass variable has 16 levels, which we can recode numerically with step_integer().
+
+```{r}
+# Original categories
+count(ames_train, MS_SubClass)
+```
+```{r}
+# Label encoded
+recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_integer(MS_SubClass) %>%
+  prep(ames_train) %>%
+  bake(ames_train) %>%
+  count(MS_SubClass)
+```
+We should be careful with label encoding unordered categorical features because most models will treat them as ordered numeric features. If a categorical feature is naturally ordered then label encoding is a natural choice (most commonly referred to as ordinal encoding). For example, the various quality features in the Ames housing data are ordinal in nature (ranging from Very_Poor to Very_Excellent).
+
+```{r}
+ames_train %>% select(contains("Qual"))
+# Original categories
+count(ames_train, Overall_Qual)
+# Label encoded
+recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_integer(Overall_Qual) %>%
+  prep(ames_train) %>%
+  bake(ames_train) %>%
+  count(Overall_Qual)
+```
+#**3.7 Dimension reduction**
+
+Dimension reduction is an alternative approach to filter out non-informative features without manually removing them. We discuss dimension reduction topics in depth later in the book (Chapters 17-19) so please refer to those chapters for details.
+
+However, we wanted to highlight that it is very common to include these types of dimension reduction approaches during the feature engineering process. For example, we may wish to reduce the dimension of our features with principal components analysis (Chapter 17) and retain the number of components required to explain, say, 95% of the variance and use these components as features in downstream modeling.
+
+```{r}
+recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_pca(all_numeric(), threshold = .95)
+```
+#**3.8 Proper implementation**
+
+We stated at the beginning of this chapter that we should think of feature engineering as creating a blueprint rather than manually performing each task individually. This helps us in two ways: (1) thinking sequentially and (2) to apply appropriately within the resampling process.
+
+3.8.1 Sequential steps
+Thinking of feature engineering as a blueprint forces us to think of the ordering of our preprocessing steps. Although each particular problem requires you to think of the effects of sequential preprocessing, there are some general suggestions that you should consider:
+
++ If using a log or Box-Cox transformation, don’t center the data first or do any operations that might make the data non-positive. Alternatively, use the Yeo-Johnson transformation so you don’t have to worry about this.
++ One-hot or dummy encoding typically results in sparse data which many algorithms can operate efficiently on. If you standardize sparse data you will create dense data and you loose the computational efficiency. Consequently, it’s often preferred to standardize your numeric features and then one-hot/dummy encode.
++ If you are lumping infrequently occurring categories together, do so before one-hot/dummy encoding.
++ Although you can perform dimension reduction procedures on categorical features, it is common to primarily do so on numeric features when doing so for feature engineering purposes.
+
+While your project’s needs may vary, here is a suggested order of potential steps that should work for most problems:
+
+- Filter out zero or near-zero variance features.
+- Perform imputation if required.
+- Normalize to resolve numeric feature skewness.
+- Standardize (center and scale) numeric features.
+- Perform dimension reduction (e.g., PCA) on numeric features.
+- One-hot or dummy encode categorical features.
+
+--------------------------------------------------------------------
+#**3.8.3 Putting the process together**
+To illustrate how this process works together via R code, let’s do a simple re-assessment on the ames data set that we did at the end of the last chapter (Section 2.7) and see if some simple feature engineering improves our prediction error. But first, we’ll formally introduce the recipes package, which we’ve been implicitly illustrating throughout.
+
+The recipes package allows us to develop our feature engineering blueprint in a sequential nature. The idea behind recipes is similar to caret::preProcess() where we want to create the preprocessing blueprint but apply it later and within each resample.17
+
+There are three main steps in creating and applying feature engineering with recipes:
+VERY IMPORTANT
+- recipe: where you define your feature engineering steps to create your blueprint.
+- prepare: estimate feature engineering parameters based on training data.
+- bake: apply the blueprint to new data.
+
+The first step is where you define your blueprint (aka recipe). With this process, you supply the formula of interest (the target variable, features, and the data these are based on) with recipe() and then you sequentially add feature engineering steps with step_xxx(). For example, the following defines Sale_Price as the target variable and then uses all the remaining columns as features based on ames_train. We then:
+
+- Remove near-zero variance features that are categorical (aka nominal).
+- Ordinal encode our quality-based features (which are inherently ordinal).
+- Center and scale (i.e., standardize) all numeric features.
+- Perform dimension reduction by applying PCA to all numeric features.
+
+```{r}
+blueprint <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_nzv(all_nominal())  %>% #Remove near-zero variance features 
+  step_integer(matches("Qual|Cond|QC|Qu")) %>% # Ordinal encoder
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_pca(all_numeric(), -all_outcomes()) #Perform dimension reduction
+  
+blueprint
+```
+Next, we need to train this blueprint on some training data. Remember, there are many feature engineering steps that we do not want to train on the test data (e.g., standardize and PCA) as this would create data leakage. So in this step we estimate these parameters based on the training data of interest.
+
+```{r}
+prepare <- prep(blueprint, training = ames_train)
+prepare
+```
+Lastly, we can apply our blueprint to new data (e.g., the training data or future test data) with bake()
+
+```{r}
+baked_train <- bake(prepare, new_data = ames_train)
+baked_test <- bake(prepare, new_data = ames_test)
+baked_train
+```
+
+
+```{r}
+dim(ames_train)
+dim(baked_train) # PCA apply to reduce dim
+```
+Consequently, the goal is to develop our blueprint, then within each resample iteration we want to apply prep() and bake() to our resample training and validation data. Luckily, the caret package simplifies this process. We only need to specify the blueprint and caret will automatically prepare and bake within each resample. We illustrate with the ames housing example.
+# **BEST METHOD IN CHAP 3 - COMBINE ALL**
+First, we create our feature engineering blueprint to perform the following tasks:
+
+- Filter out near-zero variance features for categorical features.
+- Ordinally encode all quality features, which are on a 1–10 Likert scale.
+- Standardize (center and scale) all numeric features.
+- One-hot encode our remaining categorical features.
+
+```{r}
+# Note: ames_train already remove all missing value so no need to handle missing value like raw data (drop, impute median/mode, predict with KNN, Tree...algorithm)
+blueprint <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_nzv(all_nominal()) %>%
+  step_integer(matches("Qual|Cond|QC|Qu")) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE)
+```
+
+Next, we apply the same resampling method and hyperparameter search grid as we did in Section 2.7. The only difference is when we train our resample models with train(), we supply our blueprint as the first argument and then caret takes care of the rest.
+# DO PARALLEL
+```{r}
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+```
+
+```{r}
+# Specify resampling plan 
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 5, #10
+  repeats = 1 #5
+)
+
+# Construct grid of hyperparameter values
+hyper_grid <- expand.grid(k = seq(2, 25, by = 1))
+# Each parameter turning will have 5 cv for evaluation (repates 1 in each cv) 
+# Tune a knn model using grid search
+knn_fit2 <- train(
+  blueprint, 
+  data = ames_train, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "RMSE"
+)
+```
+
+
+```{r}
+# print model results
+knn_fit2
+```
+
+
+```{r}
+# plot cross validation results
+ggplot(knn_fit2)
+```
+By applying a handful of the preprocessing techniques discussed throughout this chapter, we were able to reduce our prediction error by over 10,000$ (compare to 43,439$ with no feature engineer). The chapters that follow will look to see if we can continue reducing our error by applying different algorithms and feature engineering blueprints.
+
+# Chapter 4 Linear Regression
+```{r}
+# Helper packages
+library(dplyr)    # for data manipulation
+library(ggplot2)  # for awesome graphics
+
+# Modeling packages
+library(caret)    # for cross-validation, etc.
+library(recipes)  # for feature engineering tasks
+# Modeling process packages
+library(rsample)   # for resampling procedures
+
+# Model interpretability packages
+library(vip)      # variable importance
+```
+
+We’ll also continue working with the ames_train data set created in Section 2.7.
+
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+
+```{r}
+model1 <- lm(Sale_Price ~ Gr_Liv_Area, data = ames_train)
+summary(model1) 
+```
+The estimated coefficients from our model are β0= 8732.94 and  β1 =114.88. To interpret, we estimate that the mean selling price increases by 114.88 for each additional one square foot of above ground living space. This simple description of the relationship between the sale price and square footage using a single number (i.e., the slope) is what makes linear regression such an intuitive and popular modeling tool.
+
+```{r}
+sigma(model1)    # RMSE
+sigma(model1)^2  # MSE
+```
+In R, we can construct such (one-at-a-time) confidence intervals for each coefficient using confint(). For example, a 95% confidence intervals for the coefficients in our SLR example can be computed using
+
+```{r}
+confint(model1, level = 0.95)
+```
+To interpret, we estimate with 95% confidence that the mean selling price increases between 109.91 and 119.84 for each additional one square foot of above ground living space. We can also conclude that the slope  β1 is significantly different from zero (or any other pre-specified value not included in the interval) at the  α = 0.05 level. This is also supported by the output from summary().
+
+Most statistical software, including R, will include estimated standard errors, t-statistics, etc. as part of its regression output. However, it is important to remember that such quantities depend on three major assumptions of the linear regression model:
+
+- (1) Independent observations
+- (2) The random errors have mean zero, and constant variance
+- (3) The random errors are normally distributed
+
+If any or all of these assumptions are violated, then remedial measures need to be taken. For instance, weighted least squares (and other procedures) can be used when the constant variance assumption is violated. Transformations (of both the response and features) can also help to correct departures from these assumptions. The residuals are extremely useful in helping to identify how parametric models depart from such assumptions.
+# **Check Assumptions Automatically**
+```{r}
+# Check assumption 2:
+mean(model1$residuals) 
+# Check assumption 3: (see below)
+#par(mfrow=c(2,2))
+#plot(model1)
+```
+This pattern is indicated by the red line, which should be approximately flat if the disturbances are homoscedastic.
+
+```{r}
+#install.packages('gvlma')
+library(gvlma)
+par(mfrow=c(2,2))  # draw 4 plots in same window
+model1 <- lm(Sale_Price ~ Gr_Liv_Area, data = ames_train)
+gvlma::gvlma(model1)
+par(mfrow=c(2,2))
+plot(model1)
+```
+
+
+```{r}
+#par(mfrow=c(2,2))
+#plot(model1)
+```
+
+#**4.3 Multiple linear regression**
+```{r}
+(model2 <- lm(Sale_Price ~ Gr_Liv_Area + Year_Built, data = ames_train))
+```
+Alternatively, we can use update() to update the model formula used in model1. The new formula can use a . as shorthand for keep everything on either the left or right hand side of the formula, and a + or - can be used to add or remove terms from the original model, respectively. In the case of adding Year_Built to model1, we could’ve used:
+
+```{r}
+(model2 <- update(model1, . ~ . + Year_Built))
+```
+```{r}
+# Check assumption:
+library(gvlma)
+par(mfrow=c(2,2))  # draw 4 plots in same window
+gvlma::gvlma(model2)
+par(mfrow=c(2,2))
+plot(model2)
+```
+
+The LS estimates of the regression coefficients are  
+β1=99.176 and  β2= 1093.485 (the estimated intercept is -2123054.207. In other words, every one square foot increase to above ground square footage is associated with an additional $99.18 in mean selling price when holding the year the house was built constant. Likewise, for every year newer a home is there is approximately an increase of $1,093.48 in selling price when holding the above ground square footage constant.
+
+Note that in R, we use the : operator to include an interaction (technically, we could use * as well, but x1 * x2 is shorthand for x1 + x2 + x1:x2 so is slightly redundant):
+
+```{r}
+lm(Sale_Price ~ Gr_Liv_Area + Year_Built + Gr_Liv_Area:Year_Built, data = ames_train)
+```
+
+Interaction effects are quite prevalent in predictive modeling. Since linear models are an example of parametric modeling, it is up to the analyst to decide if and when to include interaction effects. In later chapters, we’ll discuss algorithms that can automatically detect and incorporate interaction effects (albeit in different ways). It is also important to understand a concept called the hierarchy principle—which demands that all lower-order terms corresponding to an interaction be retained in the model—when considering interaction effects in linear regression models.
+
+```{r}
+# include all possible main effects
+model3 <- lm(Sale_Price ~ ., data = ames_train) 
+
+# print estimated coefficients in a tidy data frame
+broom::tidy(model3)  
+```
+#**4.4 Assessing model accuracy**
+We can use the caret::train() function to train a linear model (i.e., method = "lm") using cross-validation (or a variety of other validation methods). In practice, a number of factors should be considered in determining a “best” model (e.g., time constraints, model production cost, predictive accuracy, etc.). The benefit of caret is that it provides built-in cross-validation capabilities, whereas the lm() function does not19. The following code chunk uses caret::train() to refit model1 using 10-fold cross-validation:
+
+```{r}
+# Train model using 10-fold cross-validation
+set.seed(123)  # for reproducibility
+(cv_model1 <- caret::train(
+  form = Sale_Price ~ Gr_Liv_Area, 
+  data = ames_train, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+))
+
+```
+The resulting cross-validated RMSE is $56,410.89 (this is the average RMSE across the 10 CV folds). How should we interpret this? When applied to unseen data, the predictions this model makes are, on average, about $56,410.89 off from the actual sale price.
+
+We can perform cross-validation on the other two models in a similar fashion, which we do in the code chunk below.
+
+```{r}
+# model 2 CV
+set.seed(123)
+cv_model2 <- train(
+  Sale_Price ~ Gr_Liv_Area + Year_Built, 
+  data = ames_train, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# model 3 CV
+set.seed(123)
+cv_model3 <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# Extract out of sample performance measures
+summary(resamples(list(
+  model1 = cv_model1, 
+  model2 = cv_model2, 
+  model3 = cv_model3
+)))
+```
+Extracting the results for each model, we see that by adding more information via more predictors, we are able to improve the out-of-sample cross validation performance metrics. Specifically, our cross-validated RMSE reduces from $46,292.38 (the model with two predictors) down to $26,098.00 (for our full model). In this case, the model with all possible main effects performs the “best” (compared with the other two).
+
+#**4.5 Model concerns**
+As previously stated, linear regression has been a popular modeling tool due to the ease of interpreting the coefficients. However, linear regression makes several strong assumptions that are often violated as we include more predictors in our model. Violation of these assumptions can lead to flawed interpretation of the coefficients and prediction results.
+
+1. Linear relationship: Linear regression assumes a linear relationship between the predictor and the response variable. However, as discussed in Chapter 3, non-linear relationships can be made linear (or near-linear) by applying transformations to the response and/or predictors. For example, Figure 4.3 illustrates the relationship between sale price and the year a home was built. The left plot illustrates the non-linear relationship that exists. However, we can achieve a near-linear relationship by log transforming sale price, although some non-linearity still exists for older homes.
+
+```{r}
+p1 <- ggplot(ames_train, aes(Year_Built, Sale_Price)) + 
+  geom_point(size = 1, alpha = .4) +
+  geom_smooth(se = FALSE) +
+  scale_y_continuous("Sale price", labels = scales::dollar) +
+  xlab("Year built") +
+  ggtitle(paste("Non-transformed variables with a\n",
+                "non-linear relationship."))
+
+p2 <- ggplot(ames_train, aes(Year_Built, Sale_Price)) + 
+  geom_point(size = 1, alpha = .4) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_y_log10("Sale price", labels = scales::dollar, 
+                breaks = seq(0, 400000, by = 100000)) +
+  xlab("Year built") +
+  ggtitle(paste("Transforming variables can provide a\n",
+                "near-linear relationship."))
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+2. Constant variance among residuals: Linear regression assumes the variance among error terms (e1,e2,e3.. ) are constant (this assumption is referred to as homoscedasticity). If the error variance is not constant, the p-values and confidence intervals for the coefficients will be invalid. Similar to the linear relationship assumption, non-constant variance can often be resolved with variable transformations or by including additional predictors. For example, Figure 4.4 shows the residuals vs. predicted values for model1 and model3. model1 displays a classic violation of constant variance as indicated by the cone-shaped pattern. However, model3 appears to have near-constant variance.
+
+The broom::augment function is an easy way to add model results to each observation (i.e. predicted values, residuals).
+
+#**summarizes key information about models with broom **
+
+```{r}
+#devtools::install_github("tidymodels/broom")
+#library(tidymodels) # include broom
+library(broom)
+tidy(cv_model1$finalModel) #summarizes information about model components
+glance(cv_model1$finalModel) #reports information about the entire model
+# It cannot show .resid, only .std.resid
+augment(cv_model1$finalModel,data = ames_train) #adds informations about observations to a dataset
+augment(cv_model1$finalModel, newdata = ames_train) %>% 
+  names()
+# It can show .resid
+model <- lm(Sale_Price ~ Gr_Liv_Area, data= ames_train)
+augment(model, newdata = ames_train) %>% 
+  names()
+```
+
+NOTE: Cannot show .resid from cvmodel, only show .resid in lm not cv
+```{r}
+
+#df1 <- broom::augment(cv_model1$finalModel, data = ames_train) #cannot show .resid
+
+model1 <- lm(Sale_Price ~ Gr_Liv_Area, data= ames_train)
+df1 <- broom::augment(model1, data = ames_train)
+
+p1 <- ggplot(df1, aes(.fitted, .resid)) + 
+  geom_point(size = 1, alpha = .4) +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  ggtitle("Model 1", subtitle = "Sale_Price ~ Gr_Liv_Area")
+
+#df2 <- broom::augment(cv_model3$finalModel, data = ames_train) #cannot show .resid
+
+model3 <- lm(Sale_Price ~ ., data= ames_train)
+df2 <- broom::augment(model3, data = ames_train)
+
+p2 <- ggplot(df2, aes(.fitted, .resid)) + 
+  geom_point(size = 1, alpha = .4)  +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  ggtitle("Model 3", subtitle = "Sale_Price ~ .")
+
+summary(cv_model1)
+summary(cv_model3)
+head(df1)
+head(df2)
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+Figure 4.4: Linear regression assumes constant variance among the residuals. model1 (left) shows definitive signs of heteroskedasticity whereas model3 (right) appears to have constant variance.
+
+3. No autocorrelation: Linear regression assumes the errors are independent and uncorrelated. If in fact, there is correlation among the errors, then the estimated standard errors of the coefficients will be biased leading to prediction intervals being narrower than they should be. For example, the left plot in Figure 4.5 displays the residuals ( y-axis) vs. the observation ID (x-axis) for model1. A clear pattern exists suggesting that information about  ϵ1 provides information about  ϵ2.
+
+This pattern is a result of the data being ordered by neighborhood, which we have not accounted for in this model. Consequently, the residuals for homes in the same neighborhood are correlated (homes within a neighborhood are typically the same size and can often contain similar features). Since the Neighborhood predictor is included in model3 (right plot), the correlation in the errors is reduced.
+
+```{r}
+df1 <- mutate(df1, id = row_number())
+df2 <- mutate(df2, id = row_number())
+
+p1 <- ggplot(df1, aes(id, .resid)) + 
+  geom_point(size = 1, alpha = .4) +
+  xlab("Row ID") +
+  ylab("Residuals") +
+  ggtitle("Model 1", subtitle = "Correlated residuals.")
+
+p2 <- ggplot(df2, aes(id, .resid)) + 
+  geom_point(size = 1, alpha = .4) +
+  xlab("Row ID") +
+  ylab("Residuals") +
+  ggtitle("Model 3", subtitle = "Uncorrelated residuals.")
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+

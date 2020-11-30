@@ -50,7 +50,8 @@ AmesHousing::ames_raw %>%
 # visual by vis_miss
 vis_miss(AmesHousing::ames_raw, cluster = TRUE)
 #3.3.2 Imputation
-
+ames_recipe %>%
+  step_medianimpute(Gr_Liv_Area)
 
 
 
