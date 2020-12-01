@@ -365,8 +365,50 @@ churn_split <- rsample::initial_split(df, prop = .7, strata = "Attrition")
 churn_train <- rsample::training(churn_split)
 churn_test  <- rsample::testing(churn_split)
 ```
-
-
+#**8.3 Choosing k**
+When using KNN for classification, it is best to assess odd numbers for  
+k to avoid ties in the event there is equal proportion of response levels (i.e. when k = 2 one of the neighbors could have class “0” while the other neighbor has class “1”).
 ```{r}
-```
+# Create blueprint
+blueprint <- recipe(Attrition ~ ., data = churn_train) %>%
+  step_nzv(all_nominal()) %>%
+  step_integer(contains("Satisfaction")) %>%
+  step_integer(WorkLifeBalance) %>%
+  step_integer(JobInvolvement) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
 
+# Create a resampling method
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 5, #10
+  repeats = 3, #5
+  classProbs = TRUE,                 
+  summaryFunction = twoClassSummary
+)
+
+# Create a hyperparameter grid search
+hyper_grid <- expand.grid(
+  k = floor(seq(1, nrow(churn_train)/3, length.out = 20))
+)
+
+# Fit knn model and perform grid search
+knn_grid <- train(
+  blueprint, 
+  data = churn_train, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "ROC"
+)
+
+ggplot(knn_grid)
+```
+Figure 8.3: Cross validated search grid results for Attrition training data where 20 values between 1 and 343 are assessed for k. When k = 1, the predicted value is based on a single observation that is closest to the target sample and when k = 343, the predicted value is based on the response with the largest proportion for 1/3 of the training sample.
+
+In contrast, the churn_train data has 1030 observations and Figure 8.3 illustrates that our loss function is not optimized until k=271
+ . Moreover, the max ROC value is 0.8078 and the overall proportion of attriting employees to non-attriting is 0.839. This suggest there is likely not a very strong signal in the Attrition data.
+```{r}
+hyper_grid # K from 1,19,37,55...343 (20 rows)
+```

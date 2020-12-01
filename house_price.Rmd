@@ -1174,6 +1174,556 @@ There are several advantages to MARS. First, MARS naturally handles mixed types 
 
 However, one disadvantage to MARS models is that they’re typically slower to train. Since the algorithm scans each value of each predictor for potential cutpoints, computational performance can suffer as both  n and p increase. Also, although correlated predictors do not necessarily impede model performance, they can make model interpretation difficult. When two features are nearly perfectly correlated, the algorithm will essentially select the first one it happens to come across when scanning the features. Then, since it randomly selected one, the correlated feature will likely not be included as it adds no additional explanatory power.
 
+#**Chapter 9 Decision Trees**
+Tree-based models are a class of nonparametric algorithms that work by partitioning the feature space into a number of smaller (non-overlapping) regions with similar response values using a set of splitting rules. Predictions are obtained by fitting a simpler model (e.g., a constant like the average response value) in each region. Such divide-and-conquer methods can produce simple rules that are easy to interpret and visualize with tree diagrams. As we’ll see, decision trees offer many benefits; however, they typically lack in predictive performance compared to more complex algorithms like neural networks and MARS. However, future chapters will discuss powerful ensemble algorithms—like random forests and gradient boosting machines—which are constructed by combining together many decision trees in a clever way. This chapter will provide you with a strong foundation in decision trees.
+
+
+```{r}
+# Helper packages
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(rsample) # for resamples  (initial_split)
+# Modeling packages
+library(rpart)       # direct engine for decision tree application
+library(caret)       # meta engine for decision tree application
+
+# Model interpretability packages
+library(rpart.plot)  # for plotting decision trees
+library(vip)         # for feature importance
+library(pdp)         # for feature effects
+```
+
+
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+We can fit a regression tree using rpart and then visualize it using rpart.plot. The fitting process and the visual output of regression trees and classification trees are very similar. Both use the formula method for expressing the model (similar to lm()). However, when fitting a regression tree, we need to set method = "anova". By default, rpart() will make an intelligent guess as to what method to use based on the data type of your response column, but it’s good practice to set this explicitly.
+
+```{r}
+ames_dt1 <- rpart(
+  formula = Sale_Price ~ .,
+  data    = ames_train,
+  method  = "anova"
+)
+ames_dt1
+```
+
+```{r}
+rpart.plot(ames_dt1)
+```
+Prunning:
+
+An alternative to explicitly specifying the depth of a decision tree is to grow a very large, complex tree and then prune it back to find an optimal subtree. We find the optimal subtree by using a cost complexity parameter ( α ) that penalizes our objective function in Equation (9.1) for the number of terminal nodes of the tree ( T) as in Equation (9.2).
+
+
+Behind the scenes rpart() is automatically applying a range of cost complexity ( αvalues to prune the tree). To compare the error for each  α value, rpart() performs a 10-fold CV (by default). In this example we find diminishing returns after 12 terminal nodes as illustrated in Figure 9.10 ( y -axis is the CV error, lower  
+x -axis is the cost complexity ( α) value, upper  
+x -axis is the number of terminal nodes (i.e., tree size =  |T|). You may also notice the dashed line which goes through the point  |T|=8
+ . Breiman (1984) suggested that in actual practice, it’s common to instead use the smallest tree within 1 standard error (SE) of the minimum CV error (this is called the 1-SE rule). Thus, we could use a tree with 8 terminal nodes and reasonably expect to experience similar results within a small margin of error.
+```{r}
+plotcp(ames_dt1)
+```
+Figure 9.10: Pruning complexity parameter (cp) plot illustrating the relative cross validation error (y-axis) for various cp values (lower x-axis). Smaller cp values lead to larger trees (upper x-axis). Using the 1-SE rule, a tree size of 10-12 provides optimal cross validation results.
+
+To illustrate the point of selecting a tree with 11 terminal nodes (or 8 if you go by the 1-SE rule), we can force rpart() to generate a full tree by setting cp = 0 (no penalty results in a fully grown tree). Figure 9.11 shows that after 11 terminal nodes, we see diminishing returns in error reduction as the tree grows deeper. Thus, we can significantly prune our tree and still achieve minimal expected error.
+
+```{r}
+ames_dt2 <- rpart(
+    formula = Sale_Price ~ .,
+    data    = ames_train,
+    method  = "anova", 
+    control = list(cp = 0, xval = 10)
+)
+
+plotcp(ames_dt2)
+abline(v = 11, lty = "dashed")
+```
+So, by default, rpart() is performing some automated tuning, with an optimal subtree of 10 total splits, 11 terminal nodes, and a cross-validated SSE of 0.292. Although rpart() does not provide the RMSE or other metrics, you can use caret. In both cases, smaller penalties (deeper trees) are providing better CV results.
+```{r}
+# rpart cross validation results
+ames_dt1$cptable
+##            CP nsplit rel error    xerror       xstd
+## 1  0.47940879      0 1.0000000 1.0014737 0.06120398
+## 2  0.11290476      1 0.5205912 0.5226036 0.03199501
+## 3  0.06999005      2 0.4076864 0.4098819 0.03111581
+## 4  0.02758522      3 0.3376964 0.3572726 0.02222507
+## 5  0.02347276      4 0.3101112 0.3339952 0.02184348
+## 6  0.02201070      5 0.2866384 0.3301630 0.02446178
+## 7  0.02039233      6 0.2646277 0.3244948 0.02421833
+## 8  0.01190364      7 0.2442354 0.3062031 0.02641595
+## 9  0.01116365      8 0.2323317 0.3025968 0.02708786
+## 10 0.01103581      9 0.2211681 0.2971663 0.02704837
+## 11 0.01000000     10 0.2101323 0.2920442 0.02704791
+```
+
+#**BESTMODEL**
+```{r}
+# caret cross validation results
+ames_dt3 <- train(
+  Sale_Price ~ .,
+  data = ames_train,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 20
+)
+
+ggplot(ames_dt3)
+```
+#**9.6 Feature interpretation**
+
+```{r}
+vip(ames_dt3, num_features = 40, bar = FALSE)
+```
+
+
+```{r}
+# Construct partial dependence plots
+p1 <- partial(ames_dt3, pred.var = "Gr_Liv_Area") %>% autoplot()
+p2 <- partial(ames_dt3, pred.var = "Year_Built") %>% autoplot()
+p3 <- partial(ames_dt3, pred.var = c("Gr_Liv_Area", "Year_Built")) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, 
+              colorkey = TRUE, screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```
+#**Chapter 10 Bagging**
+
+In Section 2.4.2 we learned about bootstrapping as a resampling procedure, which creates b new bootstrap samples by drawing samples with replacement of the original training data. This chapter illustrates how we can use bootstrapping to create an ensemble of predictions. Bootstrap aggregating, also called bagging, is one of the first ensemble algorithms28 machine learning practitioners learn and is designed to improve the stability and accuracy of regression and classification algorithms. By model averaging, bagging helps to reduce variance and minimize overfitting. Although it is usually applied to decision tree methods, it can be used with any type of method.
+
+```{r}
+# Helper packages
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(doParallel)  # for parallel backend to foreach
+library(foreach)     # for parallel processing with for loops
+
+# Modeling packages
+library(caret)       # for general model fitting
+library(rpart)       # for fitting decision trees
+library(ipred)       # for fitting bagged decision trees
+```
+The bagging() function comes from the ipred package and we use nbagg to control how many iterations to include in the bagged model and coob = TRUE indicates to use the OOB error rate. By default, bagging() uses rpart::rpart() for decision tree base learners but other base learners are available. Since bagging just aggregates a base learner, we can tune the base learner parameters as normal. Here, we pass parameters to rpart() with the control parameter and we build deep trees (no pruning) that require just two observations in a node to split.
+
+```{r}
+# make bootstrapping reproducible
+set.seed(123)
+
+# train bagged model
+ames_bag1 <- bagging(
+  formula = Sale_Price ~ .,
+  data = ames_train,
+  nbagg = 100,  
+  coob = TRUE,
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+ames_bag1
+## 
+## Bagging regression trees with 100 bootstrap replications 
+## 
+## Call: bagging.data.frame(formula = Sale_Price ~ ., data = ames_train, 
+##     nbagg = 100, coob = TRUE, control = rpart.control(minsplit = 2, 
+##         cp = 0))
+## 
+## Out-of-bag estimate of root mean squared error:  25528.78
+```
+We can also apply bagging within caret and use 10-fold CV to see how well our ensemble will generalize. We see that the cross-validated RMSE for 200 trees is similar to the OOB estimate (difference of 495). However, using the OOB error took 58 seconds to compute whereas performing the following 10-fold CV took roughly 26 minutes on our machine!
+
+```{r}
+cl <- makeCluster(8) # use 8 workers
+registerDoParallel(cl) # register the parallel backend
+
+ames_bag2 <- train(
+  Sale_Price ~ .,
+  data = ames_train,
+  method = "treebag",
+  trControl = trainControl(method = "cv", number = 5),
+  nbagg = 200,  
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+ames_bag2
+## Bagged CART 
+## 
+## 2054 samples
+##   80 predictor
+## 
+## No pre-processing
+## Resampling: Cross-Validated (10 fold) 
+## Summary of sample sizes: 1849, 1848, 1848, 1849, 1849, 1847, ... 
+## Resampling results:
+## 
+##   RMSE      Rsquared   MAE     
+##   26957.06  0.8900689  16713.14
+```
+#**10.4 Easily parallelize**
+As stated in Section 10.2, bagging can become computationally intense as the number of iterations increases. Fortunately, the process of bagging involves fitting models to each of the bootstrap samples which are completely independent of one another. This means that each model can be trained in parallel and the results aggregated in the end for the final model. Consequently, if you have access to a large cluster or number of cores, you can more quickly create bagged ensembles on larger data sets.
+
+The following illustrates parallelizing the bagging algorithm (with b=160 decision trees) on the Ames housing data using eight cores and returning the predictions for the test data for each of the trees.
+
+```{r}
+# Create a parallel socket cluster
+cl <- makeCluster(8) # use 8 workers
+registerDoParallel(cl) # register the parallel backend
+
+# Fit trees in parallel and compute predictions on the test set
+predictions <- foreach(
+  icount(160), 
+  .packages = "rpart", 
+  .combine = cbind
+  ) %dopar% {
+    # bootstrap copy of training data
+    index <- sample(nrow(ames_train), replace = TRUE)
+    ames_train_boot <- ames_train[index, ]  
+  
+    # fit tree to bootstrap copy
+    bagged_tree <- rpart(
+      Sale_Price ~ ., 
+      control = rpart.control(minsplit = 2, cp = 0),
+      data = ames_train_boot
+      ) 
+    
+    predict(bagged_tree, newdata = ames_test)
+}
+
+predictions[1:5, 1:7]
+##   result.1 result.2 result.3 result.4 result.5 result.6 result.7
+## 1   176500   187000   179900   187500   187500   187500   187500
+## 2   180000   254000   251000   240000   180000   180000   221000
+## 3   175000   174000   192000   192000   185000   178900   163990
+## 4   197900   157000   217500   215000   180000   210000   218500
+## 5   120000   129000   130000   143000   136500   153600   148500
+```
+We can then do some data wrangling to compute and plot the RMSE as additional trees are added. Our results, illustrated in Figure 10.3, closely resemble the results obtained in Figure 10.2. This also illustrates how the OOB error closely approximates the test error.
+
+```{r}
+predictions %>%
+  as.data.frame() %>%
+  mutate(
+    observation = 1:n(),
+    actual = ames_test$Sale_Price) %>%
+  tidyr::gather(tree, predicted, -c(observation, actual)) %>%
+  group_by(observation) %>%
+  mutate(tree = stringr::str_extract(tree, '\\d+') %>% as.numeric()) %>%
+  ungroup() %>%
+  arrange(observation, tree) %>%
+  group_by(observation) %>%
+  mutate(avg_prediction = cummean(predicted)) %>%
+  group_by(tree) %>%
+  summarize(RMSE = RMSE(avg_prediction, actual)) %>%
+  ggplot(aes(tree, RMSE)) +
+  geom_line() +
+  xlab('Number of trees')
+```
+```{r}
+# Shutdown parallel cluster
+stopCluster(cl)
+```
+#**10.5 Feature interpretation**
+
+```{r}
+vip::vip(ames_bag2, num_features = 40, bar = FALSE)
+```
+
+
+```{r}
+# Construct partial dependence plots
+p1 <- pdp::partial(
+  ames_bag2, 
+  pred.var = "Lot_Area",
+  grid.resolution = 20
+  ) %>% 
+  autoplot()
+
+p2 <- pdp::partial(
+  ames_bag2, 
+  pred.var = "Lot_Frontage", 
+  grid.resolution = 20
+  ) %>% 
+  autoplot()
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+#**Chapter 11 Random Forests**
+
+Random forests are a modification of bagged decision trees that build a large collection of de-correlated trees to further improve predictive performance. They have become a very popular “out-of-the-box” or “off-the-shelf” learning algorithm that enjoys good predictive performance with relatively little hyperparameter tuning. Many modern implementations of random forests exist; however, Leo Breiman’s algorithm (Breiman 2001) has largely become the authoritative procedure. This chapter will cover the fundamentals of random forests.
+
+```{r}
+#install.packages("ranger")
+# Helper packages
+library(dplyr)    # for data wrangling
+library(ggplot2)  # for awesome graphics
+library(rsample) # for resamples  (initial_split)
+
+# Modeling packages
+library(ranger)   # a c++ implementation of random forest 
+library(h2o)      # a java-based implementation of random forest
+
+```
+#**11.2 Extending bagging**
+
+Random forests are built using the same fundamental principles as decision trees (Chapter 9) and bagging (Chapter 10). Bagging trees introduces a random component into the tree building process by building many trees on bootstrapped copies of the training data. Bagging then aggregates the predictions across all the trees; this aggregation reduces the variance of the overall procedure and results in improved predictive performance. However, as we saw in Section 10.6, simply bagging trees results in tree correlation that limits the effect of variance reduction.
+
+Random forests help to reduce tree correlation by injecting more randomness into the tree-growing process.29 More specifically, while growing a decision tree during the bagging process, random forests perform split-variable randomization where each time a split is to be performed, the search for the split variable is limited to a random subset of  mtry of the original features. T
+
+1.  Given a training data set
+2.  Select number of trees to build (n_trees)
+3.  for i = 1 to n_trees do
+4.  |  Generate a bootstrap sample of the original data
+5.  |  Grow a regression/classification tree to the bootstrapped data
+6.  |  for each split do
+7.  |  | Select m_try variables at random from all p variables
+8.  |  | Pick the best variable/split-point among the m_try
+9.  |  | Split the node into two child nodes
+10. |  end
+11. | Use typical tree model stopping criteria to determine when a 
+    | tree is complete (but do not prune)
+12. end
+13. Output ensemble of trees 
+
+When  m try = p, the algorithm is equivalent to bagging decision trees.
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+```{r}
+# number of features
+n_features <- length(setdiff(names(ames_train), "Sale_Price"))
+print(n_features)
+# train a default random forest model
+ames_rf1 <- ranger(
+  Sale_Price ~ ., 
+  data = ames_train,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  seed = 123
+)
+
+# get OOB RMSE
+(default_rmse <- sqrt(ames_rf1$prediction.error))
+## [1] 24859.27
+
+```
+
+
+```{r}
+ames_rf1
+```
+#11.4 Hyperparameters
+
+- The number of trees in the forest
+- The number of features to consider at any given split:  m try
+- The complexity of each tree
+- The sampling scheme
+- The splitting rule to use during tree construction
+
+This grid search takes approximately 2 minutes.
+#**ranger Grid search**
+```{r}
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5, 10), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .63, .8),                       
+  rmse = NA                                               
+)
+print(hyper_grid)
+
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(
+    formula         = Sale_Price ~ ., 
+    data            = ames_train, 
+    num.trees       = n_features * 10,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+  )
+  # export OOB error 
+  hyper_grid$rmse[i] <- sqrt(fit$prediction.error)
+}
+
+# assess top 10 models
+hyper_grid %>%
+  arrange(rmse) %>%
+  mutate(perc_gain = (default_rmse - rmse) / default_rmse * 100) %>%
+  head(10)
+##    mtry min.node.size replace sample.fraction     rmse perc_gain
+## 1    32             1   FALSE             0.8 23975.32  3.555819
+## 2    32             3   FALSE             0.8 24022.97  3.364127
+## 3    32             5   FALSE             0.8 24032.69  3.325041
+## 4    26             3   FALSE             0.8 24103.53  3.040058
+## 5    20             1   FALSE             0.8 24132.35  2.924142
+## 6    26             5   FALSE             0.8 24144.38  2.875752
+## 7    20             3   FALSE             0.8 24194.64  2.673560
+## 8    26             1   FALSE             0.8 24216.02  2.587589
+## 9    32            10   FALSE             0.8 24224.18  2.554755
+## 10   20             5   FALSE             0.8 24249.46  2.453056
+```
+However, as we add more hyperparameters and values to search across and as our data sets become larger, you can see how a full Cartesian search can become exhaustive and computationally expensive. In addition to full Cartesian search, the h2o package provides a random grid search that allows you to jump from one random combination to another and it also provides early stopping rules that allow you to stop the grid search once a certain condition is met (e.g., a certain number of models have been trained, a certain runtime has elapsed, or the accuracy has stopped improving by a certain amount). Although using a random discrete search path will likely not find the optimal model, it typically does a good job of finding a very good model.
+
+To fit a random forest model with h2o, we first need to initiate our h2o session.
+#**H2O implementation**
+
+```{r}
+h2o.no_progress()
+h2o.init(max_mem_size = "5g")
+# convert training data to h2o object
+train_h2o <- as.h2o(ames_train)
+
+# set the response column to Sale_Price
+response <- "Sale_Price"
+n_features <- length(setdiff(names(ames_train), "Sale_Price"))
+# set the predictor names
+predictors <- setdiff(colnames(ames_train), response)
+
+h2o_rf1 <- h2o.randomForest(
+    x = predictors, 
+    y = response,
+    training_frame = train_h2o, 
+    ntrees = n_features * 10,
+    seed = 123
+)
+
+h2o_rf1
+```
+
+
+```{r}
+# hyperparameter grid
+hyper_grid <- list(
+  mtries = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min_rows = c(1, 3, 5, 10),
+  max_depth = c(10, 20, 30),
+  sample_rate = c(.55, .632, .70, .80)
+)
+
+# random grid search strategy
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  stopping_metric = "mse",
+  stopping_tolerance = 0.001,   # stop if improvement is < 0.1%
+  stopping_rounds = 10,         # over the last 10 models
+  max_runtime_secs = 60*5      # or stop search after 5 min.
+)
+```
+This grid search takes 5 minutes.
+```{r}
+# perform grid search 
+random_grid <- h2o.grid(
+  algorithm = "randomForest",
+  grid_id = "rf_random_grid",
+  x = predictors, 
+  y = response, 
+  training_frame = train_h2o,
+  hyper_params = hyper_grid,
+  ntrees = n_features * 10,
+  seed = 123,
+  stopping_metric = "RMSE",   
+  stopping_rounds = 10,           # stop if last 10 trees added 
+  stopping_tolerance = 0.005,     # don't improve RMSE by 0.5%
+  search_criteria = search_criteria
+)
+```
+
+
+```{r}
+# collect the results and sort by our model performance metric 
+# of choice
+random_grid_perf <- h2o.getGrid(
+  grid_id = "rf_random_grid", 
+  sort_by = "mse", 
+  decreasing = FALSE
+)
+random_grid_perf
+```
+
+#11.6 Feature interpretation
+
+```{r}
+# re-run model with impurity-based variable importance
+rf_impurity <- ranger(
+  formula = Sale_Price ~ ., 
+  data = ames_train, 
+  num.trees = 2000,
+  mtry = 32,
+  min.node.size = 1,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "impurity",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+
+# re-run model with permutation-based variable importance
+rf_permutation <- ranger(
+  formula = Sale_Price ~ ., 
+  data = ames_train, 
+  num.trees = 2000,
+  mtry = 32,
+  min.node.size = 1,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+```
+
+
+```{r}
+p1 <- vip::vip(rf_impurity, num_features = 25, bar = FALSE)
+p2 <- vip::vip(rf_permutation, num_features = 25, bar = FALSE)
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
 ```{r}
 ```
 

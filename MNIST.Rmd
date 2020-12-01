@@ -10,6 +10,7 @@ library(doParallel)
 cl <-makePSOCKcluster(5)
 registerDoParallel(cl)
 # Helper packages
+library(tidyverse)
 library(dplyr)      # for data wrangling
 library(ggplot2)    # for awesome graphics
 library(rsample)    # for creating validation splits
@@ -17,10 +18,123 @@ library(recipes)    # for feature engineering
 
 # Modeling packages
 library(caret)       # for fitting KNN models
+
+```
+
+
+```{r}
 # import MNIST training data
 mnist <- dslabs::read_mnist()
 names(mnist)
 ## [1] "train" "test"
+set.seed(123)
+index <- sample(nrow(mnist$train$images), size = 10000)
+mnist_x <- mnist$train$images[index, ]
+mnist_y <- factor(mnist$train$labels[index])
+dim(mnist_x)
+length(mnist_y)
+```
+
+Recall that the MNIST data contains 784 features representing the darkness (0–255) of pixels in images of handwritten numbers (0–9). As stated in Section 8.2.2, KNN models can be severely impacted by irrelevant features. One culprit of this is zero, or near-zero variance features (see Section 3.4). Figure 8.4 illustrates that there are nearly 125 features that have zero variance and many more that have very little variation.
+
+```{r}
+mnist_x %>%
+  as.data.frame() %>%
+  map_df(sd) %>%
+  gather(feature, sd) %>%
+  ggplot(aes(sd)) +
+  geom_histogram(binwidth = 1)
+```
+Figure 8.4: Distribution of variability across the MNIST features. We see a significant number of zero variance features that should be removed. (sd=0: ~ 125 features)
+
+By identifying and removing these zero (or near-zero) variance features, we end up keeping 249 of the original 784 predictors. This can cause dramatic improvements to both the accuracy and speed of our algorithm. Furthermore, by removing these upfront we can remove some of the overhead experienced by caret::train(). Furthermore, we need to add column names to the feature matrices as these are required by caret.
+```{r}
+# Rename features
+colnames(mnist_x) <- paste0("V", 1:ncol(mnist_x))
+
+# Remove near zero variance features manually
+nzv <- nearZeroVar(mnist_x)
+index <- setdiff(1:ncol(mnist_x), nzv)
+mnist_x <- mnist_x[, index]
+dim(mnist_x)
+```
+Next we perform our search grid. Since we are working with a larger data set, using resampling (e.g., k -fold cross validation) becomes costly. Moreover, as we have more data, our estimated error rate produced by a simple train vs. validation set becomes less biased and variable. Consequently, the following CV procedure (cv) uses 70% of our data to train and the remaining 30% for validation. We can adjust the number of times we do this which becomes similar to the bootstrap procedure discussed in Section 2.4.
+```{r}
+# Use train/validate resampling method
+cv <- trainControl(
+  method = "LGOCV", 
+  p = 0.7,
+  number = 1,
+  savePredictions = TRUE
+)
+
+# Create a hyperparameter grid search
+hyper_grid <- expand.grid(k = seq(3, 25, by = 2))
+
+# Execute grid search
+knn_mnist <- train(
+  mnist_x,
+  mnist_y,
+  method = "knn",
+  tuneGrid = hyper_grid,
+  preProc = c("center", "scale"),
+  trControl = cv
+)
+
+ggplot(knn_mnist)
+
+```
+Figure 8.6 illustrates the grid search results and our best model used 3 nearest neighbors and provided an accuracy of 93.8%. Looking at the results for each class, we can see that 8s were the hardest to detect followed by 2s, 3s, and 4s (based on sensitivity). The most common incorrectly predicted digit is 1 (specificity).
+
+```{r}
+# Create confusion matrix
+cm <- confusionMatrix(knn_mnist$pred$pred, knn_mnist$pred$obs)
+cm$byClass[, c(1:2, 11)]  # sensitivity, specificity, & accuracy
+##          Sensitivity Specificity Balanced Accuracy
+## Class: 0   0.9641638   0.9962374         0.9802006
+## Class: 1   0.9916667   0.9841210         0.9878938
+## Class: 2   0.9155666   0.9955114         0.9555390
+## Class: 3   0.9163952   0.9920325         0.9542139
+## Class: 4   0.8698630   0.9960538         0.9329584
+## Class: 5   0.9151404   0.9914891         0.9533148
+## Class: 6   0.9795322   0.9888684         0.9842003
+## Class: 7   0.9326520   0.9896962         0.9611741
+## Class: 8   0.8224382   0.9978798         0.9101590
+## Class: 9   0.9329897   0.9852687         0.9591292
+```
+#**Feature importance**
+Feature importance for KNNs is computed by finding the features with the smallest distance measure (see Equation (8.1)). Since the response variable in the MNIST data is multiclass, the variable importance scores below sort the features by maximum importance across the classes.
+
+```{r}
+# Top 20 most important features
+vi <- varImp(knn_mnist)
+vi
+## ROC curve variable importance
+## 
+##   variables are sorted by maximum importance across the classes
+##   only 20 most important variables shown (out of 249)
+## 
+##          X0     X1     X2     X3     X4     X5     X6     X7     X8    X9
+## V435 100.00 100.00 100.00 100.00 100.00 100.00 100.00 100.00 100.00 80.56
+## V407  99.42  99.42  99.42  99.42  99.42  99.42  99.42  99.42  99.42 75.21
+## V463  97.88  97.88  97.88  97.88  97.88  97.88  97.88  97.88  97.88 83.27
+## V379  97.38  97.38  97.38  97.38  97.38  97.38  97.38  97.38  97.38 86.56
+## V434  95.87  95.87  95.87  95.87  95.87  95.87  96.66  95.87  95.87 76.20
+## V380  96.10  96.10  96.10  96.10  96.10  96.10  96.10  96.10  96.10 88.04
+## V462  95.56  95.56  95.56  95.56  95.56  95.56  95.56  95.56  95.56 83.38
+## V408  95.37  95.37  95.37  95.37  95.37  95.37  95.37  95.37  95.37 75.05
+## V352  93.55  93.55  93.55  93.55  93.55  93.55  93.55  93.55  93.55 87.13
+## V490  93.07  93.07  93.07  93.07  93.07  93.07  93.07  93.07  93.07 81.88
+## V406  92.90  92.90  92.90  92.90  92.90  92.90  92.90  92.90  92.90 74.55
+## V437  70.79  60.44  92.79  52.04  71.11  83.42  75.51  91.15  52.02 70.79
+## V351  92.41  92.41  92.41  92.41  92.41  92.41  92.41  92.41  92.41 82.08
+## V409  70.55  76.12  88.11  54.54  79.94  77.69  84.88  91.91  52.72 76.12
+## V436  89.96  89.96  90.89  89.96  89.96  89.96  91.39  89.96  89.96 78.83
+## V464  76.73  76.51  90.24  76.51  76.51  76.58  77.67  82.02  76.51 76.73
+## V491  89.49  89.49  89.49  89.49  89.49  89.49  89.49  89.49  89.49 77.41
+## V598  68.01  68.01  88.44  68.01  68.01  84.92  68.01  88.25  68.01 38.76
+## V465  63.09  36.58  87.68  38.16  50.72  80.62  59.88  84.28  57.13 63.09
+## V433  63.74  55.69  76.69  55.69  57.43  55.69  87.59  68.44  55.69 63.74
 ```
 
 
