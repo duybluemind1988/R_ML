@@ -705,7 +705,7 @@ ggplot(cv_model_pcr)
 ```
 
 
-
+#** BEST METHOD**
 #**4.7 Partial least squares**
 
 ```{r}
@@ -755,57 +755,424 @@ pdp::partial(cv_model_pls, "Total_Bsmt_SF", grid.resolution = 20, plot = TRUE)
 
 Linear regression is usually the first supervised learning algorithm you will learn. The approach provides a solid fundamental understanding of the supervised learning task; however, as we’ve discussed there are several concerns that result from the assumptions required. Although extensions of linear regression that integrate dimension reduction steps into the algorithm can help address some of the problems with linear regression, more advanced supervised algorithms typically provide greater flexibility and improved accuracy. Nonetheless, understanding linear regression provides a foundation that will serve you well in learning these more advanced methods.
 
+# **Chapter 6 Regularized Regression**
+
+Linear models (LMs) provide a simple, yet effective, approach to predictive modeling. Moreover, when certain assumptions required by LMs are met (e.g., constant variance), the estimated coefficients are unbiased and, of all linear unbiased estimates, have the lowest variance. However, in today’s world, data sets being analyzed typically contain a large number of features. As the number of features grow, certain assumptions typically break down and these models tend to overfit the training data, causing our out of sample error to increase. Regularization methods provide a means to constrain or regularize the estimated coefficients, which can reduce the variance and decrease out of sample error.
 ```{r}
+#install.packages("glmnet")
+# Helper packages
+library(recipes)  # for feature engineering
+library(rsample) # for resamples  (initial_split)
+
+# Modeling packages
+library(glmnet)   # for implementing regularized regression
+library(caret)    # for automating the tuning process
+
+# Model interpretability packages
+library(vip)      # for variable importance
+```
+
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+the OLS objective function performs quite well when our data adhere to a few key assumptions:
+
+- Linear relationship;
+- There are more observations (n) than features (p) (n>p);
+- No or little multicollinearity.
+
+The objective function of a regularized regression model is similar to OLS, albeit with a penalty term P:
+
+minimize (SSE+P)
+
+This penalty parameter constrains the size of the coefficients such that the only way the coefficients can increase is if we experience a comparable decrease in the sum of squared errors (SSE).
+
+There are three common penalty parameters we can implement:
+
+1. Ridge;
+2. Lasso (or LASSO);
+3. Elastic net (or ENET), which is a combination of ridge and lasso.
+
+#**6.3 Implementation**
+
+First, we illustrate an implementation of regularized regression using the direct engine glmnet. This will provide you with a strong sense of what is happening with a regularized model. Realize there are other implementations available (e.g., h2o, elasticnet, penalized). Then, in Section 6.4, we’ll demonstrate how to apply a regularized model so we can properly compare it with our previous predictive models.
+
+The glmnet package is extremely efficient and fast, even on very large data sets (mostly due to its use of Fortran to solve the lasso problem via coordinate descent); note, however, that it only accepts the non-formula XY interface (2.3.1) so prior to modeling we need to separate our feature and target sets.
+
+```{r}
+# Create training  feature matrices
+#
+# model.matrix creates a design (or model) matrix, e.g., by expanding factors to a set of dummy variables #(depending on the contrasts) and expanding interactions similarly.
+# we use model.matrix(...)[, -1] to discard the intercept
+X <- model.matrix(Sale_Price ~ ., ames_train)[, -1]
+
+# transform y with log transformation
+Y <- log(ames_train$Sale_Price)
+```
+```{r}
+dim(X)
+dim(ames_train)
+length(Y)
+print("ames_train names:  ")
+names(ames_train)
+print("X names: ")
+head(names(as.data.frame(X)))
+```
+
+To apply a regularized model we can use the glmnet::glmnet() function. The alpha parameter tells glmnet to perform a ridge (alpha = 0), lasso (alpha = 1), or elastic net (0 < alpha < 1) model. By default, glmnet will do two things that you should be aware of:
+
+1. Since regularized methods apply a penalty to the coefficients, we need to ensure our coefficients are on a common scale. If not, then predictors with naturally larger values (e.g., total square footage) will be penalized more than predictors with naturally smaller values (e.g., total number of rooms). By default, glmnet automatically standardizes your features. If you standardize your predictors prior to glmnet you can turn this argument off with standardize = FALSE.
+
+2. glmnet will fit ridge models across a wide range of λ values, which is illustrated in Figure 6.5.
+
+```{r}
+# Apply ridge regression to ames data
+ridge <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+plot(ridge, xvar = "lambda")
+```
+
+Figure 6.5: Coefficients for our ridge regression model as  λ grows from  0 → ∞.
+
+```{r}
+# lambdas applied to penalty parameter
+ridge$lambda %>% head()
+## [1] 285.8055 260.4153 237.2807 216.2014 196.9946 179.4942
+
+# small lambda results in large coefficients
+coef(ridge)[c("Latitude", "Overall_QualVery_Excellent"), 100]
+##                   Latitude Overall_QualVery_Excellent 
+##                  0.4048216                  0.1423770
+
+# large lambda results in small coefficients
+coef(ridge)[c("Latitude", "Overall_QualVery_Excellent"), 1]  
+##                                      Latitude 
+## 0.0000000000000000000000000000000000063823847 
+##                    Overall_QualVery_Excellent 
+## 0.0000000000000000000000000000000000009838114
+
+```
+#**6.4 Tuning**
+
+```{r}
+# Apply CV ridge regression to Ames data
+ridge <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+# Apply CV lasso regression to Ames data
+lasso <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+# plot results
+par(mfrow = c(1, 2))
+plot(ridge, main = "Ridge penalty\n\n")
+plot(lasso, main = "Lasso penalty\n\n")
 ```
 
 
 ```{r}
+# Ridge model
+min(ridge$cvm)       # minimum MSE
+## [1] 0.01748122
+ridge$lambda.min     # lambda for this min MSE
+## [1] 0.1051301
+
+ridge$cvm[ridge$lambda == ridge$lambda.1se]  # 1-SE rule
+## [1] 0.01975572
+ridge$lambda.1se  # lambda for this MSE
+## [1] 0.4657917
+
+# Lasso model
+min(lasso$cvm)       # minimum MSE
+## [1] 0.01754244
+lasso$lambda.min     # lambda for this min MSE
+## [1] 0.00248579
+lasso$nzero[lasso$lambda == lasso$lambda.min] # No. of coef | Min MSE
+## s51 
+## 139
+
+lasso$cvm[lasso$lambda == lasso$lambda.1se]  # 1-SE rule
+## [1] 0.01979976
+lasso$lambda.1se  # lambda for this MSE
+## [1] 0.01003518
+lasso$nzero[lasso$lambda == lasso$lambda.1se] # No. of coef | 1-SE MSE
+## s36 
+##  64
+```
+Above, we saw that both ridge and lasso penalties provide similar MSEs; however, these plots illustrate that ridge is still using all 294 features whereas the lasso model can get a similar MSE while reducing the feature set from 294 down to 139. However, there will be some variability with this MSE and we can reasonably assume that we can achieve a similar MSE with a slightly more constrained model that uses only 64 features. Although this lasso model does not offer significant improvement over the ridge model, we get approximately the same accuracy by using only 64 features! If describing and interpreting the predictors is an important component of your analysis, this may significantly aid your endeavor.
+
+```{r}
+# Ridge model
+ridge_min <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+# Lasso model
+lasso_min <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+par(mfrow = c(1, 2))
+# plot ridge model
+plot(ridge_min, xvar = "lambda", main = "Ridge penalty\n\n")
+abline(v = log(ridge$lambda.min), col = "red", lty = "dashed")
+abline(v = log(ridge$lambda.1se), col = "blue", lty = "dashed")
+
+# plot lasso model
+plot(lasso_min, xvar = "lambda", main = "Lasso penalty\n\n")
+abline(v = log(lasso$lambda.min), col = "red", lty = "dashed")
+abline(v = log(lasso$lambda.1se), col = "blue", lty = "dashed")
+```
+Often, the optimal model contains an alpha somewhere between 0–1, thus we want to tune both the  
+λ and the alpha parameters. As in Chapters 4 and 5, we can use the caret package to automate the tuning process. This ensures that any feature engineering is appropriately applied within each resample. The following performs a grid search over 10 values of the alpha parameter between 0–1 and ten values of the lambda parameter from the lowest to highest lambda values identified by glmnet.
+
+The following snippet of code shows that the model that minimized RMSE used an alpha of 0.1 and  
+λ of 0.02. The minimum RMSE of 0.1277585  slightly improves upon the full ridge and lasso models produced earlier
+#**BEST METHOD IN THIS CHAPTER**
+```{r}
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
 ```
 
 
 ```{r}
+# for reproducibility
+set.seed(123)
+
+# grid search across 
+cv_glmnet <- train(
+  x = X,
+  y = Y,
+  method = "glmnet",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 5),
+  tuneLength = 10
+)
+
+# model with lowest RMSE
+cv_glmnet$bestTune
+##   alpha     lambda
+## 7   0.1 0.02007035
+
+# results for model with lowest RMSE
+cv_glmnet$results %>%
+  filter(alpha == cv_glmnet$bestTune$alpha, lambda == cv_glmnet$bestTune$lambda)
+##   alpha     lambda      RMSE  Rsquared        MAE     RMSESD RsquaredSD
+## 1   0.1 0.02007035 0.1277585 0.9001487 0.08102427 0.02235901  0.0346677
+##         MAESD
+## 1 0.005667366
+
+# plot cross-validated RMSE
+ggplot(cv_glmnet)
 ```
 
 
 ```{r}
-```
+# predict sales price on training data
+pred <- predict(cv_glmnet, X)
 
+# compute RMSE of transformed predicted
+RMSE(exp(pred), exp(Y))
+## [1] 19905.05
+```
+#**6.5 Feature interpretation**
 
 ```{r}
+vip(cv_glmnet, num_features = 20, geom = "point")
 ```
+#**6.7 Final thoughts**
 
+Regularized regression provides many great benefits over traditional GLMs when applied to large data sets with lots of features. It provides a great option for handling the  n>pproblem, helps minimize the impact of multicollinearity, and can perform automated feature selection. It also has relatively few hyperparameters which makes them easy to tune, computationally efficient compared to other algorithms discussed in later chapters, and memory efficient.
+
+However, regularized regression does require some feature preprocessing. Notably, all inputs must be numeric; however, some packages (e.g., caret and h2o) automate this process. They cannot automatically handle missing data, which requires you to remove or impute them prior to modeling. Similar to GLMs, they are also not robust to outliers in both the feature and target. Lastly, regularized regression models still assume a monotonic linear relationship (always increasing or decreasing in a linear fashion). It is also up to the analyst whether or not to include specific interaction effects.
+
+#**Chapter 7 Multivariate Adaptive Regression Splines**
+
+The previous chapters discussed algorithms that are intrinsically linear. Many of these models can be adapted to nonlinear patterns in the data by manually adding nonlinear model terms (e.g., squared terms, interaction effects, and other transformations of the original features); however, to do so you the analyst must know the specific nature of the nonlinearities and interactions a priori. Alternatively, there are numerous algorithms that are inherently nonlinear. When using these models, the exact form of the nonlinearity does not need to be known explicitly or specified prior to model training. Rather, these algorithms will search for, and discover, nonlinearities and interactions in the data that help maximize predictive accuracy.
+
+This chapter discusses multivariate adaptive regression splines (MARS) (Friedman 1991), an algorithm that automatically creates a piecewise linear model which provides an intuitive stepping block into nonlinearity after grasping the concept of multiple linear regression. Future chapters will focus on other nonlinear algorithms.
+```{r}
+# Helper packages
+library(dplyr)     # for data wrangling
+library(ggplot2)   # for awesome plotting
+library(rsample) # for resamples  (initial_split)
+# Modeling packages
+library(earth)     # for fitting MARS models
+library(caret)     # for automating the tuning process
+
+# Model interpretability packages
+library(vip)       # for variable importance
+library(pdp)       # for variable relationships
+```
+#**7.3 Fitting a basic MARS model**
+```{r}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
 
 ```{r}
-```
+# Fit a basic MARS model
+mars1 <- earth(
+  Sale_Price ~ .,  
+  data = ames_train   
+)
 
+# Print model summary
+print(mars1)
+```
+It also shows us that 36 of 39 terms were used from 27 of the 307 original predictors. But what does this mean? If we were to look at all the coefficients, we would see that there are 36 terms in our model (including the intercept). These terms include hinge functions produced from the original 307 predictors (307 predictors because the model automatically dummy encodes categorical features).
+```{r}
+summary(mars1) %>% .$coefficients %>% head(10)
+```
 
 ```{r}
+plot(mars1, which = 1)
+```
+Figure 7.3: Model summary capturing GCV  
+R2 (left-hand y-axis and solid black line) based on the number of terms retained (x-axis) which is based on the number of predictors used to make those terms (right-hand side y-axis). For this model, 35 non-intercept terms were retained which are based on 27 predictors. Any additional terms retained in the model, over and above these 35, result in less than 0.001 improvement in the GCV  R2.
+
+ In addition to pruning the number of knots, earth::earth() allows us to also assess potential interactions between different hinge functions. The following illustrates this by including a degree = 2 argument. You can see that now our model includes interaction terms between a maximum of two hinge functions 
+```{r}
+# Fit a basic MARS model
+mars2 <- earth(
+  Sale_Price ~ .,  
+  data = ames_train,
+  degree = 2
+)
+
+# check out the first 10 coefficient terms
+summary(mars2) %>% .$coefficients %>% head(10)
 ```
 
+#**7.4 Tuning**
+#**BEST MODEL**
+There are two important tuning parameters associated with our MARS model: the maximum degree of interactions and the number of terms retained in the final model. We need to perform a grid search to identify the optimal combination of these hyperparameters that minimize prediction error (the above pruning process was based only on an approximation of CV model performance on the training data rather than an exact k-fold CV process). As in previous chapters, we’ll perform a CV grid search to identify the optimal hyperparameter mix. Below, we set up a grid that assesses 30 different combinations of interaction complexity (degree) and the number of terms to retain in the final model (nprune).
+
+Rarely is there any benefit in assessing greater than 3-rd degree interactions and we suggest starting out with 10 evenly spaced values for nprune and then you can always zoom in to a region once you find an approximate optimal solution.
+```{r}
+# create a tuning grid
+hyper_grid <- expand.grid(
+  degree = 1:3, 
+  nprune = seq(2, 100, length.out = 10) %>% floor()
+)
+
+head(hyper_grid)
+```
+
+As in the previous chapters, we can use caret to perform a grid search using 10-fold CV. The model that provides the optimal combination includes second degree interaction effects and retains 56 terms. The cross-validated RMSE for these models is displayed in Figure 7.4; the optimal model’s cross-validated RMSE was $26,817.
+```{r}
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+```
+
+VERY IMPORTANT: This grid search took roughly five minutes to complete.
+```{r}
+# Cross-validated model
+set.seed(123)  # for reproducibility
+cv_mars <- train(
+  x = subset(ames_train, select = -Sale_Price),
+  y = ames_train$Sale_Price,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = hyper_grid
+)
+
+```
 
 ```{r}
-```
+# View results
+cv_mars$bestTune
+##    nprune degree
+## 16     56      2
 
+cv_mars$results %>%
+  filter(nprune == cv_mars$bestTune$nprune, degree == cv_mars$bestTune$degree)
+##   degree nprune    RMSE  Rsquared      MAE   RMSESD RsquaredSD    MAESD
+## 1      2     56 26817.1 0.8838914 16439.15 11683.73 0.09785945 1678.672
+
+ggplot(cv_mars)
+```
+The above grid search helps to focus where we can further refine our model tuning. As a next step, we could perform a grid search that focuses in on a refined grid space for nprune (e.g., comparing 45–65 terms retained). However, for brevity we’ll leave this as an exercise for the reader.
+
+So how does this compare to our previously built models for the Ames housing data? The following table compares the cross-validated RMSE for our tuned MARS model to an ordinary multiple regression model along with tuned principal component regression (PCR), partial least squares (PLS), and regularized regression (elastic net) models.
+
+Although the MARS model did not have a lower MSE than the elastic net and PLS models, you can see that the the median RMSE of all the cross validation iterations was lower. However, there is one fold (Fold08) that had an extremely large RMSE that is skewing the mean RMSE for the MARS model. This would be worth exploring as there are likely some unique observations that are skewing the results.
 
 ```{r}
+cv_mars$resample
 ```
 
+#**7.5 Feature interpretation**
+```{r}
+# variable importance plots
+p1 <- vip(cv_mars, num_features = 40, geom = "point", value = "gcv") + ggtitle("GCV")
+p2 <- vip(cv_mars, num_features = 40, geom = "point", value = "rss") + ggtitle("RSS")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+Its important to realize that variable importance will only measure the impact of the prediction error as features are included; however, it does not measure the impact for particular hinge functions created for a given feature. For example, in Figure 7.5 we see that Gr_Liv_Area and Year_Built are the two most influential variables; however, variable importance does not tell us how our model is treating the non-linear patterns for each feature. Also, if we look at the interaction terms our model retained, we see interactions between different hinge functions.
 
 ```{r}
+# extract coefficients, convert to tidy data frame, and
+# filter for interaction terms
+cv_mars$finalModel %>%
+  coef() %>%  
+  broom::tidy() %>%  
+  filter(stringr::str_detect(names, "\\*")) 
 ```
-
+To better understand the relationship between these features and Sale_Price, we can create partial dependence plots (PDPs) for each feature individually and also together. The individual PDPs illustrate that our model found that one knot in each feature provides the best fit. For example, as homes exceed 2,787 square feet, each additional square foot demands a higher marginal increase in sale price than homes with less than 2,787 square feet. Similarly, for homes built in 2004 or later, there is a greater marginal effect on sales price based on the age of the home than for homes built prior to 2004. The interaction plot (far right figure) illustrates the stronger effect these two features have when combined.
 
 ```{r}
+# Construct partial dependence plots
+p1 <- partial(cv_mars, pred.var = "Gr_Liv_Area", grid.resolution = 10) %>% 
+  autoplot()
+p2 <- partial(cv_mars, pred.var = "Year_Built", grid.resolution = 10) %>% 
+  autoplot()
+p3 <- partial(cv_mars, pred.var = c("Gr_Liv_Area", "Year_Built"), 
+              grid.resolution = 10) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, colorkey = TRUE, 
+              screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
 ```
+#**7.7 Final thoughts**
 
+There are several advantages to MARS. First, MARS naturally handles mixed types of predictors (quantitative and qualitative). MARS considers all possible binary partitions of the categories for a qualitative predictor into two groups.25 Each group then generates a pair of piecewise indicator functions for the two categories. MARS also requires minimal feature engineering (e.g., feature scaling) and performs automated feature selection. For example, since MARS scans each predictor to identify a split that improves predictive accuracy, non-informative features will not be chosen. Furthermore, highly correlated predictors do not impede predictive accuracy as much as they do with OLS models.
 
-```{r}
-```
-
-
-```{r}
-```
-
+However, one disadvantage to MARS models is that they’re typically slower to train. Since the algorithm scans each value of each predictor for potential cutpoints, computational performance can suffer as both  n and p increase. Also, although correlated predictors do not necessarily impede model performance, they can make model interpretation difficult. When two features are nearly perfectly correlated, the algorithm will essentially select the first one it happens to come across when scanning the features. Then, since it randomly selected one, the correlated feature will likely not be included as it adds no additional explanatory power.
 
 ```{r}
 ```

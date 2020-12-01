@@ -90,6 +90,7 @@ tidy(model3)
 ```
 
 #**5.5 Assessing model accuracy**
+#** BEST METHOD**
 With a basic understanding of logistic regression under our belt, similar to linear regression our concern now shifts to how well do our models predict. As in the last chapter, we’ll use caret::train() and fit three 10-fold cross validated logistic regression models. Extracting the accuracy measures (in this case, classification accuracy), we see that both cv_model1 and cv_model2 had an average accuracy of 83.88%. However, cv_model3 which used all predictor variables in our data achieved an average accuracy rate of 87.58%.
 ```{r}
 set.seed(123)
@@ -168,7 +169,7 @@ Similar to linear regression, we can perform a PLS logistic regression to assess
 
 PLS was originally designed to be used for continuous features. Although you are not restricted from using PLS on categorical features, it is commonly advised to start with numeric features and explore alternative options for categorical features (i.e. ordinal encode, label encode, factor analysis.
 
-
+#**LOGISTIC REGRESSION COMBINE WITH PLS**
 ```{r}
 # Perform 10-fold CV on a PLS model tuning the number of PCs to 
 # use as predictors
@@ -210,15 +211,159 @@ vip(cv_model3, num_features = 20)
 
 Logistic regression provides an alternative to linear regression for binary classification problems. However, similar to linear regression, logistic regression suffers from the many assumptions involved in the algorithm (i.e. linear relationship of the coefficient, multicollinearity). Moreover, often we have more than two classes to predict which is commonly referred to as multinomial classification. Although multinomial extensions of logistic regression exist, the assumptions made only increase and, often, the stability of the coefficient estimates (and therefore the accuracy) decrease. Future chapters will discuss more advanced algorithms that provide a more natural and trustworthy approach to binary and multinomial classification prediction.
 
+#**Chapter 6 Regularized Regression**
+#**BEST METHOD 6.5 chapter**
+We saw that regularization significantly improved our predictive accuracy for the Ames data set, but how about for the employee attrition example? In Chapter 5 we saw a maximum CV accuracy of 86.3% for our logistic regression model. We see a little improvement in the following with some preprocessing; however, performing a regularized logistic regression model provides us with an additional 0.8% improvement in accuracy (likely within the margin of error).
+
 ```{r}
+#Do parallel
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+# Helper packages
+library(recipes)  # for feature engineering
+library(rsample) # for resamples  (initial_split)
+# Modeling packages
+library(glmnet)   # for implementing regularized regression
+library(caret)    # for automating the tuning process
+# Model interpretability packages
+library(vip)      # for variable importance
+library(modeldata) # data for some ML model
+data("attrition")
+# mutate_if() is particularly useful for transforming variables from
+# one type to another
+df <- attrition %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+# Create training (70%) and test (30%) sets for the
+# rsample::attrition data. Use set.seed for reproducibility
+set.seed(123)
+churn_split <- initial_split(df, prop = .7, strata = "Attrition")
+train <- training(churn_split)
+test  <- testing(churn_split)
+
+# train logistic regression model
+set.seed(123)
+glm_mod <- train(
+  Attrition ~ ., 
+  data = train, 
+  method = "glm",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10)
+  )
+
+# train regularized logistic regression model
+set.seed(123)
+penalized_mod <- train(
+  Attrition ~ ., 
+  data = train, 
+  method = "glmnet",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+  )
+
+# extract out of sample performance measures
+summary(resamples(list(
+  logistic_model = glm_mod, 
+  penalized_model = penalized_mod
+  )))$statistics$Accuracy
+##                      Min.   1st Qu.    Median      Mean   3rd Qu.
+## logistic_model  0.8365385 0.8495146 0.8792476 0.8757893 0.8907767
+## penalized_model 0.8446602 0.8759280 0.8834951 0.8835759 0.8915469
+##                      Max. NA's
+## logistic_model  0.9313725    0
+## penalized_model 0.9411765    0
 ```
 
+#**Chapter 7 Multivariate Adaptive Regression Splines**
+#BESTMODEL
 
+The MARS method and algorithm can be extended to handle classification problems and GLMs in general.24 We saw significant improvement to our predictive accuracy on the Ames data with a MARS model, but how about the employee attrition example? In Chapter 5 we saw a slight improvement in our cross-validated accuracy rate using regularized regression. Here, we tune a MARS model using the same search grid as we did above. We see our best models include no interaction effects and the optimal model retained 12 terms.
 ```{r}
+#Do parallel
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+# Helper packages
+library(recipes)  # for feature engineering
+library(rsample) # for resamples  (initial_split)
+# Modeling packages
+library(glmnet)   # for implementing regularized regression
+library(caret)    # for automating the tuning process
+library(earth)     # for fitting MARS models
+# Model interpretability packages
+library(vip)       # for variable importance
+library(pdp)       # for variable relationships
+#data for some ML model
+library(modeldata) # data for some ML model
+data("attrition")
+# mutate_if() is particularly useful for transforming variables from
+# one type to another
+df <- attrition %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+# Create training (70%) and test (30%) sets for the rsample::attrition data.
+# Use set.seed for reproducibility
+set.seed(123)
+churn_split <- rsample::initial_split(df, prop = .7, strata = "Attrition")
+churn_train <- rsample::training(churn_split)
+churn_test  <- rsample::testing(churn_split)
+
+# for reproducibiity
+set.seed(123)
+
+# cross validated model
+tuned_mars <- train(
+  x = subset(churn_train, select = -Attrition),
+  y = churn_train$Attrition,
+  method = "earth",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = hyper_grid
+)
+
+# best model
+tuned_mars$bestTune
+##   nprune degree
+## 2     12      1
+
+# plot results
+ggplot(tuned_mars)
 ```
+However, comparing our MARS model to the previous linear models (logistic regression and regularized regression), we do not see any improvement in our overall accuracy rate.
 
+#**Chapter 8 K-Nearest Neighbors**
+
+K-nearest neighbor (KNN) is a very simple algorithm in which each observation is predicted based on its “similarity” to other observations. Unlike most methods in this book, KNN is a memory-based algorithm and cannot be summarized by a closed-form model. This means the training samples are required at run-time and predictions are made directly from the sample relationships. Consequently, KNNs are also known as lazy learners (Cunningham and Delany 2007) and can be computationally inefficient. However, KNNs have been successful in a large number of business problems (see, for example, Jiang et al. (2012) and Mccord and Chuah (2011)) and are useful for preprocessing purposes as well (as was discussed in Section 3.3.2).
 
 ```{r}
+#Do parallel
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+# Helper packages
+library(recipes)  # for feature engineering
+library(rsample) # for resamples  (initial_split)
+# Modeling packages
+library(glmnet)   # for implementing regularized regression
+library(caret)    # for automating the tuning process, KNN model
+library(earth)     # for fitting MARS models
+# Model interpretability packages
+library(vip)       # for variable importance
+library(pdp)       # for variable relationships
+#data for some ML model
+library(modeldata) # data for some ML model
+data("attrition")
+# mutate_if() is particularly useful for transforming variables from
+# one type to another
+df <- attrition %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+# Create training (70%) and test (30%) sets for the rsample::attrition data.
+# Use set.seed for reproducibility
+set.seed(123)
+churn_split <- rsample::initial_split(df, prop = .7, strata = "Attrition")
+churn_train <- rsample::training(churn_split)
+churn_test  <- rsample::testing(churn_split)
 ```
 
 
