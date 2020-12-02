@@ -1492,6 +1492,7 @@ Random forests help to reduce tree correlation by injecting more randomness into
 
 When  m try = p, the algorithm is equivalent to bagging decision trees.
 ```{r}
+library(rsample) # for resamples  (initial_split)
 # Ames housing data
 ames <- AmesHousing::make_ames()
 #ames.h2o <- as.h2o(ames)
@@ -1702,9 +1703,28 @@ p2 <- vip::vip(rf_permutation, num_features = 25, bar = FALSE)
 
 gridExtra::grid.arrange(p1, p2, nrow = 1)
 ```
+#**Chapter 12 Gradient Boosting**
+```{r}
+# Helper packages
+library(dplyr)    # for general data wrangling needs
 
+# Modeling packages
+library(gbm)      # for original implementation of regular and stochastic GBMs
+library(h2o)      # for a java-based implementation of GBM variants
+library(xgboost)  # for fitting extreme gradient boosting
+```
 
 ```{r}
+library(rsample) # for resamples  (initial_split)
+# Ames housing data
+ames <- AmesHousing::make_ames()
+#ames.h2o <- as.h2o(ames)
+dim(ames) #2930 rows, 81 columns
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
 ```
 
 
