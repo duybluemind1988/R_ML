@@ -1729,6 +1729,11 @@ ames_test   <- testing(split)
 
 
 ```{r}
+h2o.init(max_mem_size = "10g")
+
+train_h2o <- as.h2o(ames_train)
+response <- "Sale_Price"
+predictors <- setdiff(colnames(ames_train), response)
 ```
 
 
