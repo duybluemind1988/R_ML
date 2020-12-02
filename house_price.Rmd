@@ -1,6 +1,6 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "R not Notebook"
+output: html_document #html_notebook
 ---
 ## Chapter 3 Feature & Target Engineering
 **Library**
@@ -1706,6 +1706,7 @@ gridExtra::grid.arrange(p1, p2, nrow = 1)
 #**Chapter 12 Gradient Boosting**
 ```{r}
 # Helper packages
+#install.packages("xgboost")
 library(dplyr)    # for general data wrangling needs
 
 # Modeling packages
@@ -1726,34 +1727,628 @@ split <- initial_split(ames, prop = 0.7,
 ames_train  <- training(split)
 ames_test   <- testing(split)
 ```
+```{r}
+library(doParallel)
+cl <-makePSOCKcluster(5)
+registerDoParallel(cl)
+```
 
 
 ```{r}
+# run a basic GBM model
+set.seed(123)  # for reproducibility
+ames_gbm1 <- gbm(
+  formula = Sale_Price ~ .,
+  data = ames_train,
+  distribution = "gaussian",  # SSE loss function
+  n.trees = 5000,
+  shrinkage = 0.1,
+  interaction.depth = 3,
+  n.minobsinnode = 10,
+  cv.folds = 5
+)
+
+# find index for number trees with minimum CV error
+best <- which.min(ames_gbm1$cv.error)
+
+# get MSE and compute RMSE
+sqrt(ames_gbm1$cv.error[best])
+## [1] 23240.38
+#Our results show a cross-validated SSE of 23240 which was achieved with 1219 trees.
+
+# plot error curve
+gbm.perf(ames_gbm1, method = "cv")
+```
+#12.3.3 General tuning strategy
+
+The following grid search took us about 10 minutes.
+
+```{r}
+# create grid search
+hyper_grid <- expand.grid(
+  learning_rate = c(0.3, 0.1, 0.05, 0.01, 0.005),
+  RMSE = NA,
+  trees = NA,
+  time = NA
+)
+
+# execute grid search
+for(i in seq_len(nrow(hyper_grid))) {
+
+  # fit gbm
+  set.seed(123)  # for reproducibility
+  train_time <- system.time({
+    m <- gbm(
+      formula = Sale_Price ~ .,
+      data = ames_train,
+      distribution = "gaussian",
+      n.trees = 5000, 
+      shrinkage = hyper_grid$learning_rate[i], 
+      interaction.depth = 3, 
+      n.minobsinnode = 10,
+      cv.folds = 10 
+   )
+  })
+  
+  # add SSE, trees, and training time to results
+  hyper_grid$RMSE[i]  <- sqrt(min(m$cv.error))
+  hyper_grid$trees[i] <- which.min(m$cv.error)
+  hyper_grid$Time[i]  <- train_time[["elapsed"]]
+
+}
+
+# results
+arrange(hyper_grid, RMSE)
+##   learning_rate  RMSE trees  time
+## 1         0.050 21382  2375 129.5
+## 2         0.010 21828  4982 126.0
+## 3         0.100 22252   874 137.6
+## 4         0.005 23136  5000 136.8
+## 5         0.300 24454   427 139.9
+```
+Next, we’ll set our learning rate at the optimal level (0.05) and tune the tree specific hyperparameters (interaction.depth and n.minobsinnode). Adjusting the tree-specific parameters provides us with an additional 600 reduction in RMSE.
+
+This grid search takes about 30 minutes.
+
+```{r}
+# search grid
+hyper_grid <- expand.grid(
+  n.trees = 6000,
+  shrinkage = 0.01,
+  interaction.depth = c(3, 5, 7),
+  n.minobsinnode = c(5, 10, 15)
+)
+
+# create model fit function
+model_fit <- function(n.trees, shrinkage, interaction.depth, n.minobsinnode) {
+  set.seed(123)
+  m <- gbm(
+    formula = Sale_Price ~ .,
+    data = ames_train,
+    distribution = "gaussian",
+    n.trees = n.trees,
+    shrinkage = shrinkage,
+    interaction.depth = interaction.depth,
+    n.minobsinnode = n.minobsinnode,
+    cv.folds = 10
+  )
+  # compute RMSE
+  sqrt(min(m$cv.error))
+}
+
+# perform search grid with functional programming
+hyper_grid$rmse <- purrr::pmap_dbl(
+  hyper_grid,
+  ~ model_fit(
+    n.trees = ..1,
+    shrinkage = ..2,
+    interaction.depth = ..3,
+    n.minobsinnode = ..4
+    )
+)
+
+# results
+arrange(hyper_grid, rmse)
+##   n.trees shrinkage interaction.depth n.minobsinnode  rmse
+## 1    4000      0.05                 5              5 20699
+## 2    4000      0.05                 3              5 20723
+## 3    4000      0.05                 7              5 21021
+## 4    4000      0.05                 3             10 21382
+## 5    4000      0.05                 5             10 21915
+## 6    4000      0.05                 5             15 21924
+## 7    4000      0.05                 3             15 21943
+## 8    4000      0.05                 7             10 21999
+## 9    4000      0.05                 7             15 22348
+```
+
+#12.4 Stochastic GBMs
+
+```{r}
+# refined hyperparameter grid
+hyper_grid <- list(
+  sample_rate = c(0.5, 0.75, 1),              # row subsampling
+  col_sample_rate = c(0.5, 0.75, 1),          # col subsampling for each split
+  col_sample_rate_per_tree = c(0.5, 0.75, 1)  # col subsampling for each tree
+)
+
+# random grid search strategy
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  stopping_metric = "mse",
+  stopping_tolerance = 0.001,   
+  stopping_rounds = 10,         
+  max_runtime_secs = 60*60      
+)
+
+# perform grid search 
+grid <- h2o.grid(
+  algorithm = "gbm",
+  grid_id = "gbm_grid",
+  x = predictors, 
+  y = response,
+  training_frame = train_h2o,
+  hyper_params = hyper_grid,
+  ntrees = 6000,
+  learn_rate = 0.01,
+  max_depth = 7,
+  min_rows = 5,
+  nfolds = 10,
+  stopping_rounds = 10,
+  stopping_tolerance = 0,
+  search_criteria = search_criteria,
+  seed = 123
+)
+
+# collect the results and sort by our model performance metric of choice
+grid_perf <- h2o.getGrid(
+  grid_id = "gbm_grid", 
+  sort_by = "mse", 
+  decreasing = FALSE
+)
+
+grid_perf
+## H2O Grid Details
+## ================
+## 
+## Grid ID: gbm_grid 
+## Used hyper parameters: 
+##   -  col_sample_rate 
+##   -  col_sample_rate_per_tree 
+##   -  sample_rate 
+## Number of models: 18 
+## Number of failed models: 0 
+## 
+## Hyper-Parameter Search Summary: ordered by increasing mse
+##    col_sample_rate col_sample_rate_per_tree sample_rate         model_ids                  mse
+## 1              0.5                      0.5         0.5  gbm_grid_model_8  4.462965966345138E8
+## 2              0.5                      1.0         0.5  gbm_grid_model_3  4.568248274796835E8
+## 3              0.5                     0.75        0.75 gbm_grid_model_12 4.6466647244785947E8
+## 4             0.75                      0.5        0.75  gbm_grid_model_5  4.689665768861389E8
+## 5              1.0                     0.75         0.5 gbm_grid_model_14 4.7010349266737276E8
+## 6              0.5                      0.5        0.75 gbm_grid_model_10  4.713882927949245E8
+## 7             0.75                      1.0         0.5  gbm_grid_model_4  4.729884840420368E8
+## 8              1.0                      1.0         0.5  gbm_grid_model_1  4.770705550988762E8
+## 9              1.0                     0.75        0.75  gbm_grid_model_6 4.9292332262147874E8
+## 10            0.75                      1.0        0.75 gbm_grid_model_13  4.985715082289563E8
+## 11            0.75                      0.5         1.0  gbm_grid_model_2 5.0271257831462187E8
+## 12            0.75                     0.75        0.75 gbm_grid_model_15 5.0981695262733763E8
+## 13            0.75                     0.75         1.0  gbm_grid_model_9 5.3137490858680266E8
+## 14            0.75                      1.0         1.0 gbm_grid_model_11   5.77518690995319E8
+## 15             1.0                      1.0         1.0  gbm_grid_model_7  6.037512241688542E8
+## 16             1.0                     0.75         1.0 gbm_grid_model_16 1.9742225720119803E9
+## 17             0.5                      1.0        0.75 gbm_grid_model_17 4.1339991380839005E9
+## 18             1.0                      0.5         1.0 gbm_grid_model_18  5.949489361558916E
+
+```
+
+
+```{r}
+# Grab the model_id for the top model, chosen by cross validation error
+best_model_id <- grid_perf@model_ids[[1]]
+best_model <- h2o.getModel(best_model_id)
+
+# Now let’s get performance metrics on the best model
+h2o.performance(model = best_model, xval = TRUE)
+## H2ORegressionMetrics: gbm
+## ** Reported on cross-validation data. **
+## ** 10-fold cross-validation on training data (Metrics computed for combined holdout predictions) **
+## 
+## MSE:  446296597
+## RMSE:  21125.73
+## MAE:  13045.95
+## RMSLE:  0.1240542
+## Mean Residual Deviance :  446296597
+```
+#12.5 XGBoost
+
+```{r}
+library(recipes)
+xgb_prep <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_integer(all_nominal()) %>%
+  prep(training = ames_train, retain = TRUE) %>%
+  juice()
+
+X <- as.matrix(xgb_prep[setdiff(names(xgb_prep), "Sale_Price")])
+Y <- xgb_prep$Sale_Price
+```
+
+```{r}
+set.seed(123)
+ames_xgb <- xgb.cv(
+  data = X,
+  label = Y,
+  nrounds = 6000,
+  objective = "reg:linear",
+  early_stopping_rounds = 50, 
+  nfold = 10,
+  params = list(
+    eta = 0.1,
+    max_depth = 3,
+    min_child_weight = 3,
+    subsample = 0.8,
+    colsample_bytree = 1.0),
+  verbose = 0
+)  
+
+# minimum test CV RMSE
+min(ames_xgb$evaluation_log$test_rmse_mean)
+## [1] 20488
+```
+GRID SEARCH
+
+```{r}
+# hyperparameter grid
+hyper_grid <- expand.grid(
+  eta = 0.01,
+  max_depth = 3, 
+  min_child_weight = 3,
+  subsample = 0.5, 
+  colsample_bytree = 0.5,
+  gamma = c(0, 1, 10, 100, 1000),
+  lambda = c(0, 1e-2, 0.1, 1, 100, 1000, 10000),
+  alpha = c(0, 1e-2, 0.1, 1, 100, 1000, 10000),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+
+# grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 4000,
+    objective = "reg:linear",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid$eta[i], 
+      max_depth = hyper_grid$max_depth[i],
+      min_child_weight = hyper_grid$min_child_weight[i],
+      subsample = hyper_grid$subsample[i],
+      colsample_bytree = hyper_grid$colsample_bytree[i],
+      gamma = hyper_grid$gamma[i], 
+      lambda = hyper_grid$lambda[i], 
+      alpha = hyper_grid$alpha[i]
+    ) 
+  )
+  hyper_grid$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid$trees[i] <- m$best_iteration
+}
+
+# results
+hyper_grid %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+## Observations: 98
+## Variables: 10
+## $ eta              <dbl> 0.01, 0.01, 0.01, 0.01, 0.01, 0.0…
+## $ max_depth        <dbl> 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, …
+## $ min_child_weight <dbl> 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, …
+## $ subsample        <dbl> 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5…
+## $ colsample_bytree <dbl> 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5…
+## $ gamma            <dbl> 0, 1, 10, 100, 1000, 0, 1, 10, 10…
+## $ lambda           <dbl> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, …
+## $ alpha            <dbl> 0.00, 0.00, 0.00, 0.00, 0.00, 0.1…
+## $ rmse             <dbl> 20488, 20488, 20488, 20488, 20488…
+## $ trees            <dbl> 3944, 3944, 3944, 3944, 3944, 381…
+```
+
+
+```{r}
+# optimal parameter list
+params <- list(
+  eta = 0.01,
+  max_depth = 3,
+  min_child_weight = 3,
+  subsample = 0.5,
+  colsample_bytree = 0.5
+)
+
+# train final model
+xgb.fit.final <- xgboost(
+  params = params,
+  data = X,
+  label = Y,
+  nrounds = 3944,
+  objective = "reg:linear",
+  verbose = 0
+)
+```
+12.6 Feature interpretation
+
+```{r}
+# variable importance plot
+vip::vip(xgb.fit.final) 
+```
+
+#**Chapter 15 Stacked Models**
+
+```{r}
+# Helper packages
+library(rsample)   # for creating our train-test splits
+library(recipes)   # for minor feature engineering tasks
+
+# Modeling packages
+library(h2o)       # for fitting stacked models
+```
+
+
+```{r}
+# Load and split the Ames housing data
+ames <- AmesHousing::make_ames()
+set.seed(123)  # for reproducibility
+split <- initial_split(ames, strata = "Sale_Price")
+ames_train <- training(split)
+ames_test <- testing(split)
+```
+
+```{r}
+# Make sure we have consistent categorical levels
+blueprint <- recipe(Sale_Price ~ ., data = ames_train) %>%
+  step_other(all_nominal(), threshold = 0.005)
+
+# Create training & test sets for h2o
+h2o.init()
+train_h2o <- prep(blueprint, training = ames_train, retain = TRUE) %>%
+  juice() %>%
+  as.h2o()
+test_h2o <- prep(blueprint, training = ames_train) %>%
+  bake(new_data = ames_test) %>%
+  as.h2o()
+
+# Get response and feature names
+Y <- "Sale_Price"
+X <- setdiff(names(ames_train), Y)
+```
+
+#**15.3 Stacking existing models**
+
+```{r}
+# Train & cross-validate a GLM model
+best_glm <- h2o.glm(
+  x = X, y = Y, training_frame = train_h2o, alpha = 0.1,
+  remove_collinear_columns = TRUE, nfolds = 5, fold_assignment = "Modulo",
+  keep_cross_validation_predictions = TRUE, seed = 123
+)
+
+# Train & cross-validate a RF model
+best_rf <- h2o.randomForest(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 1000, mtries = 20,
+  max_depth = 30, min_rows = 1, sample_rate = 0.8, nfolds = 5,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "RMSE",
+  stopping_tolerance = 0
+)
+
+# Train & cross-validate a GBM model
+best_gbm <- h2o.gbm(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 5000, learn_rate = 0.01,
+  max_depth = 7, min_rows = 5, sample_rate = 0.8, nfolds = 5,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "RMSE",
+  stopping_tolerance = 0
+)
+
+# Train & cross-validate an XGBoost model
+best_xgb <- h2o.xgboost(
+  x = X, y = Y, training_frame = train_h2o, ntrees = 5000, learn_rate = 0.05,
+  max_depth = 3, min_rows = 3, sample_rate = 0.8, categorical_encoding = "Enum",
+  nfolds = 5, fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, seed = 123, stopping_rounds = 50,
+  stopping_metric = "RMSE", stopping_tolerance = 0
+)
+```
+We can now use h2o.stackedEnsemble() to stack these models. Note how we feed the base learner models into the base_models = list() argument. Here, we apply a random forest model as the metalearning algorithm. However, you could also apply regularized regression, GBM, or a neural network as the metalearner (see ?h2o.stackedEnsemble for details).
+
+```{r}
+# Train a stacked tree ensemble
+ensemble_tree <- h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = train_h2o, model_id = "my_tree_ensemble",
+  base_models = list(best_glm, best_rf, best_gbm, best_xgb),
+  metalearner_algorithm = "drf"
+)
+```
+
+Since our ensemble is built on the CV results of the base learners, but has no cross-validation results of its own, we’ll use the test data to compare our results. If we assess the performance of our base learners on the test data we see that the stochastic GBM base learner has the lowest RMSE of 20859.92. The stacked model achieves a small 1% performance gain with an RMSE of 20664.56.
+```{r}
+# Get results from base learners
+get_rmse <- function(model) {
+  results <- h2o.performance(model, newdata = test_h2o)
+  results@metrics$RMSE
+}
+list(best_glm, best_rf, best_gbm, best_xgb) %>%
+  purrr::map_dbl(get_rmse)
+## [1] 30024.67 23075.24 20859.92 21391.20
+
+# Stacked results
+h2o.performance(ensemble_tree, newdata = test_h2o)@metrics$RMSE
+## [1] 20664.56
+```
+We previously stated that the biggest gains are usually produced when we are stacking base learners that have high variability, and uncorrelated, predicted values. If we assess the correlation of the CV predictions we can see strong correlation across the base learners, especially with three tree-based learners. Consequentley, stacking provides less advantage in this situation since the base learners have highly correlated predictions; however, a 1% performance improvement can still be considerable improvement depending on the business context.
+
+```{r}
+data_compare<-data.frame(
+                GLM_pred = as.vector(h2o.getFrame(best_glm@model$cross_validation_holdout_predictions_frame_id$name)),
+                RF_pred = as.vector(h2o.getFrame(best_rf@model$cross_validation_holdout_predictions_frame_id$name)),
+                GBM_pred = as.vector(h2o.getFrame(best_gbm@model$cross_validation_holdout_predictions_frame_id$name)),
+                XGB_pred = as.vector(h2o.getFrame(best_xgb@model$cross_validation_holdout_predictions_frame_id$name))
+              )
+data_compare
+
+```
+
+
+```{r}
+data_compare %>% cor()
+##           GLM_pred   RF_pred  GBM_pred  XGB_pred
+## GLM_pred 1.0000000 0.9390229 0.9291982 0.9345048
+## RF_pred  0.9390229 1.0000000 0.9920349 0.9821944
+## GBM_pred 0.9291982 0.9920349 1.0000000 0.9854160
+## XGB_pred 0.9345048 0.9821944 0.9854160 1.0000000
+```
+#**15.4 Stacking a grid search**
+An alternative ensemble approach focuses on stacking multiple models generated from the same base learner. In each of the previous chapters, you learned how to perform grid searches to automate the tuning process. Often we simply select the best performing model in the grid search but we can also apply the concept of stacking to this process.
+
+Many times, certain tuning parameters allow us to find unique patterns within the data. By stacking the results of a grid search, we can capitalize on the benefits of each of the models in our grid search to create a meta model. For example, the following performs a random grid search across a wide range of GBM hyperparameter settings. We set the search to stop after 25 models have run.
+
+```{r}
+<<<<<<< HEAD
 h2o.init(max_mem_size = "10g")
 
 train_h2o <- as.h2o(ames_train)
 response <- "Sale_Price"
 predictors <- setdiff(colnames(ames_train), response)
+=======
+# Define GBM hyperparameter grid
+hyper_grid <- list(
+  max_depth = c(1, 3, 5),
+  min_rows = c(1, 5, 10),
+  learn_rate = c(0.01, 0.05, 0.1),
+  learn_rate_annealing = c(0.99, 1),
+  sample_rate = c(0.5, 0.75, 1),
+  col_sample_rate = c(0.8, 0.9, 1)
+)
+
+# Define random grid search criteria
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  max_models = 25
+)
+
+# Build random grid search 
+random_grid <- h2o.grid(
+  algorithm = "gbm", grid_id = "gbm_grid", x = X, y = Y,
+  training_frame = train_h2o, hyper_params = hyper_grid,
+  search_criteria = search_criteria, ntrees = 5000, stopping_metric = "RMSE",     
+  stopping_rounds = 10, stopping_tolerance = 0, nfolds = 5, 
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123
+)
+>>>>>>> 842aca2cf2143bbd985e79ee46d78a99a0f1797b
 ```
 
 
 ```{r}
+# Sort results by RMSE
+h2o.getGrid(
+  grid_id = "gbm_grid", 
+  sort_by = "rmse"
+)
 ```
 
 
 ```{r}
+# Grab the model_id for the top model, chosen by validation error
+best_model_id <- random_grid_perf@model_ids[[1]]
+best_model <- h2o.getModel(best_model_id)
+h2o.performance(best_model, newdata = test_h2o)
+## H2ORegressionMetrics: gbm
+## 
+## MSE:  466551295
+## RMSE:  21599.8
+## MAE:  13697.78
+## RMSLE:  0.1090604
+## Mean Residual Deviance :  466551295
+```
+
+Rather than use the single best model, we can combine all the models in our grid search using a super learner. In this example, our super learner does not provide any performance gains because the hyperparameter settings of the leading models have low variance which results in predictions that are highly correlated. However, in cases where you see high variability across hyperparameter settings for your leading models, stacking the grid search or even the leaders in the grid search can provide significant performance gains.
+
+```{r}
+# Train a stacked ensemble using the GBM grid
+ensemble <- h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = train_h2o, model_id = "ensemble_gbm_grid",
+  base_models = random_grid@model_ids, metalearner_algorithm = "gbm"
+)
+
+# Eval ensemble performance on a test set
+h2o.performance(ensemble, newdata = test_h2o)
+## H2ORegressionMetrics: stackedensemble
+## 
+## MSE:  469579433
+## RMSE:  21669.78
+## MAE:  13499.93
+## RMSLE:  0.1061244
+## Mean Residual Deviance :  469579433
+```
+
+#**15.5 Automated machine learning**
+The following performs an automated search for two hours, which ended up assessing 80 models. h2o.automl() will automatically use the same folds for stacking so you do not need to specify fold_assignment = "Modulo". This allows for consistent model comparison across the same CV sets. We see that most of the leading models are GBM variants and achieve an RMSE in the 22000–23000 range. As you probably noticed, this was not as good as some of our best models we found using our own GBM grid searches (reference Chapter 12). However, we could start this AutoML procedure and then spend our two hours performing other tasks while h2o automatically assesses these 80 models. The AutoML procedure then provides us direction for further analysis. In this case, we could start by further assessing the hyperparameter settings in the top five GBM models to see if there were common attributes that could point us to additional grid searches worth exploring.
+
+```{r}
+# Use AutoML to find a list of candidate models (i.e., leaderboard)
+auto_ml <- h2o.automl(
+  x = X, y = Y, training_frame = train_h2o, nfolds = 5, 
+  max_runtime_secs = 60 * 120, max_models = 50,
+  keep_cross_validation_predictions = TRUE, sort_metric = "RMSE", seed = 123,
+  stopping_rounds = 50, stopping_metric = "RMSE", stopping_tolerance = 0
+)
 ```
 
 
 ```{r}
-```
+# Assess the leader board; the following truncates the results to show the top 
+# and bottom 15 models. You can get the top model with auto_ml@leader
+auto_ml@leaderboard %>% 
+  as.data.frame() %>%
+  dplyr::select(model_id, rmse) %>%
+  dplyr::slice(1:25)
+##                                               model_id   rmse
+## 1                     XGBoost_1_AutoML_20190220_084553   22229.97
+## 2            GBM_grid_1_AutoML_20190220_084553_model_1   22437.26
+## 3            GBM_grid_1_AutoML_20190220_084553_model_3   22777.57
+## 4                         GBM_2_AutoML_20190220_084553   22785.60
+## 5                         GBM_3_AutoML_20190220_084553   23133.59
+## 6                         GBM_4_AutoML_20190220_084553   23185.45
+## 7                     XGBoost_2_AutoML_20190220_084553   23199.68
+## 8                     XGBoost_1_AutoML_20190220_075753   23231.28
+## 9                         GBM_1_AutoML_20190220_084553   23326.57
+## 10           GBM_grid_1_AutoML_20190220_075753_model_2   23330.42
+## 11                    XGBoost_3_AutoML_20190220_084553   23475.23
+## 12       XGBoost_grid_1_AutoML_20190220_084553_model_3   23550.04
+## 13      XGBoost_grid_1_AutoML_20190220_075753_model_15   23640.95
+## 14       XGBoost_grid_1_AutoML_20190220_084553_model_8   23646.66
+## 15       XGBoost_grid_1_AutoML_20190220_084553_model_6   23682.37
+## ...                                                ...        ...
+## 65           GBM_grid_1_AutoML_20190220_084553_model_5   33971.32
+## 66           GBM_grid_1_AutoML_20190220_075753_model_8   34489.39
+## 67  DeepLearning_grid_1_AutoML_20190220_084553_model_3   36591.73
+## 68           GBM_grid_1_AutoML_20190220_075753_model_6   36667.56
+## 69      XGBoost_grid_1_AutoML_20190220_084553_model_13   40416.32
+## 70           GBM_grid_1_AutoML_20190220_075753_model_9   47744.43
+## 71    StackedEnsemble_AllModels_AutoML_20190220_084553   49856.66
+## 72    StackedEnsemble_AllModels_AutoML_20190220_075753   59127.09
+## 73 StackedEnsemble_BestOfFamily_AutoML_20190220_084553   76714.90
+## 74 StackedEnsemble_BestOfFamily_AutoML_20190220_075753   76748.40
+## 75           GBM_grid_1_AutoML_20190220_075753_model_5   78465.26
+## 76           GBM_grid_1_AutoML_20190220_075753_model_3   78535.34
+## 77           GLM_grid_1_AutoML_20190220_075753_model_1   80284.34
+## 78           GLM_grid_1_AutoML_20190220_084553_model_1   80284.34
+## 79       XGBoost_grid_1_AutoML_20190220_075753_model_4   92559.44
+## 80      XGBoost_grid_1_AutoML_20190220_075753_model_10  125384.88
 
-
-```{r}
-```
-
-
-```{r}
 ```
 
 
