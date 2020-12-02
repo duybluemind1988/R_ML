@@ -2215,13 +2215,13 @@ An alternative ensemble approach focuses on stacking multiple models generated f
 Many times, certain tuning parameters allow us to find unique patterns within the data. By stacking the results of a grid search, we can capitalize on the benefits of each of the models in our grid search to create a meta model. For example, the following performs a random grid search across a wide range of GBM hyperparameter settings. We set the search to stop after 25 models have run.
 
 ```{r}
-<<<<<<< HEAD
+
 h2o.init(max_mem_size = "10g")
 
 train_h2o <- as.h2o(ames_train)
 response <- "Sale_Price"
 predictors <- setdiff(colnames(ames_train), response)
-=======
+
 # Define GBM hyperparameter grid
 hyper_grid <- list(
   max_depth = c(1, 3, 5),
@@ -2247,7 +2247,7 @@ random_grid <- h2o.grid(
   fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
   seed = 123
 )
->>>>>>> 842aca2cf2143bbd985e79ee46d78a99a0f1797b
+
 ```
 
 
