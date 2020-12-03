@@ -164,8 +164,8 @@ mnist_x <- mnist_x / 255
 ```
 
 ```{r}
-tensorflow::install_tensorflow()
-tensorflow::tf_config()
+#tensorflow::install_tensorflow()
+#tensorflow::tf_config()
 ```
 
 ```{r}
@@ -458,9 +458,103 @@ runs %>%
 ## $ type               <chr> "training"
 ```
 
+#**Chapter 20 K-means Clustering**
+
+```{r}
+# Helper packages
+library(dplyr)       # for data manipulation
+library(ggplot2)     # for data visualization
+library(stringr)     # for string functionality
+
+# Modeling packages
+library(cluster)     # for general clustering algorithms
+library(factoextra)  # for visualizing cluster results
+```
+
+```{r}
+mnist <- dslabs::read_mnist()
+```
+
+```{r}
+features <- mnist$train$images
+
+# Use k-means model with 10 centers and 10 random starts
+mnist_clustering <- kmeans(features, centers = 10, nstart = 10)
+
+# Print contents of the model output
+str(mnist_clustering)
+## List of 9
+##  $ cluster     : int [1:60000] 5 9 3 8 10 7 4 5 4 6 ...
+##  $ centers     : num [1:10, 1:784] 0 0 0 0 0 0 0 0 0 0 ...
+##   ..- attr(*, "dimnames")=List of 2
+##   .. ..$ : chr [1:10] "1" "2" "3" "4" ...
+##   .. ..$ : NULL
+##  $ totss       : num 205706725984
+##  $ withinss    : num [1:10] 23123576673 14119007546 16438261395 7950166288 ...
+##  $ tot.withinss: num 153017742761
+##  $ betweenss   : num 52688983223
+##  $ size        : int [1:10] 7786 5384 5380 5515 7051 6706 4634 5311 4971 7262
+##  $ iter        : int 8
+##  $ ifault      : int 0
+##  - attr(*, "class")= chr "kmeans"
+```
+
+
+```{r}
+# Extract cluster centers
+mnist_centers <- mnist_clustering$centers
+dim(mnist_centers)
+```
+
+
+```{r}
+# Plot typical cluster digits
+par(mfrow = c(2, 5), mar=c(0.5, 0.5, 0.5, 0.5))
+layout(matrix(seq_len(nrow(mnist_centers)), 2, 5, byrow = FALSE))
+for(i in seq_len(nrow(mnist_centers))) {
+  image(matrix(mnist_centers[i, ], 28, 28)[, 28:1], 
+        col = gray.colors(12, rev = TRUE), xaxt="n", yaxt="n")
+}
+```
+
+
+```{r}
+# Create mode function
+mode_fun <- function(x){  
+  which.max(tabulate(x))
+}
+
+mnist_comparison <- data.frame(
+  cluster = mnist_clustering$cluster,
+  actual = mnist$train$labels
+) %>%
+  group_by(cluster) %>%
+  mutate(mode = mode_fun(actual)) %>%
+  ungroup() %>%
+  mutate_all(factor, levels = 0:9)
+
+# Create confusion matrix and plot results
+yardstick::conf_mat(
+  mnist_comparison, 
+  truth = actual, 
+  estimate = mode
+) %>%
+  autoplot(type = 'heatmap')
+```
+#20.6 How many clusters?
+
+```{r}
+
+```
+
 
 ```{r}
 ```
+
+
+```{r}
+```
+
 
 ```{r}
 ```
