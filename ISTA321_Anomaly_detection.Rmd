@@ -1,0 +1,247 @@
+---
+title: "Untitled"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(dbscan)
+library(factoextra)
+```
+
+# 15.2 Return of DBSCAN
+```{r}
+ai <- read_csv("https://docs.google.com/spreadsheets/d/1-u9UDLcXqcHrxsmpltAqAAYAfeaG0ZSiqqL2HhyGHJc/gviz/tq?tqx=out:csv")
+dim(ai)
+head(ai)
+```
+
+
+```{r}
+ggplot(ai,
+       aes(x = age, y = income)) +
+  geom_point()
+```
+
+15.2.2 Applying DBSCAN
+```{r}
+ai_scaled <- data.frame(scale(ai))
+ai_db <- dbscan(ai_scaled, eps = 0.3, minPts = 5)
+ai_db
+```
+
+
+```{r}
+#add cluster
+ai$cluster <- ai_db$cluster
+# and if it's an outlier
+ai$anomaly <- ifelse(ai$cluster == 0, 'yes', 'no')
+```
+
+
+```{r}
+ggplot(ai,
+       aes(x = age, y = income, color = anomaly)) +
+  geom_point()
+```
+#15.4 Identifying an anomaly in trendless data
+
+```{r}
+temperature <- runif(n = 24, min = 68, max = 72)
+hour <- c(1:24)
+df <- data.frame(temperature, hour)
+df
+```
+
+
+```{r}
+quantile(df$temperature)
+```
+
+
+```{r}
+upper_out_bound <- quantile(df$temperature)[4] + IQR(df$temperature)*1.5
+lower_out_bound <- quantile(df$temperature)[2] - IQR(df$temperature)*1.5
+```
+
+
+```{r}
+ggplot(df,
+       aes(x = hour, y = temperature)) +
+  geom_point() + geom_line() +
+  geom_hline(yintercept = upper_out_bound, color = 'red') +
+  geom_hline(yintercept = lower_out_bound, color = 'red') +
+  ylim(c(60,100)) + xlim(c(1,24))
+```
+
+
+```{r}
+df[7,1] <- 90 # insert anomaly
+df$anomaly <- ifelse(df$temperature >= 90, 'yes', 'no') #IE for color coding
+upper_out_bound <- quantile(df$temperature)[4] + IQR(df$temperature)*1.5
+lower_out_bound <- quantile(df$temperature)[2] - IQR(df$temperature)*1.5
+
+ggplot(df,
+       aes(x = hour, y = temperature)) +
+  geom_point() + geom_line() + 
+  geom_hline(yintercept = upper_out_bound, color = 'red') +
+  geom_hline(yintercept = lower_out_bound, color = 'red') +
+  geom_point(aes(x = 7, y = 90), color = 'red', size = 3) +
+  ylim(c(60,100)) + xlim(c(1,24))
+```
+#15.5 But what if there is a pattern?
+
+```{r}
+df$temperature_day  <- c(81, 79, 77, 75, 76, 80, 84, 87, 92, 94, 95, 97, 99, 100, 99, 98, 97, 95, 93, 92, 89, 87, 85, 83) # make a gross but real vector
+
+ggplot(df,
+       aes(x = hour, y = temperature_day)) +
+  geom_point() + geom_line() +
+  ylim(c(55,100)) + xlim(c(1,24))
+```
+
+And we could encounter an error in a sensor reading like this. It looks pretty bad, but this would be hard to detect using just our regular outlier method as the IQR is wide, and thus the outlier boundary is wide. We can see that the outlier boundary falls below the clearly anomalous point.
+
+```{r}
+df[15,'temperature_day'] <- 62 # add anomaly
+upper_out_bound <- quantile(df$temperature_day)[4] + IQR(df$temperature_day)*1.5
+lower_out_bound <- quantile(df$temperature_day)[2] - IQR(df$temperature_day)*1.5
+
+
+ggplot(df,
+       aes(x = hour, y = temperature_day)) +
+  geom_point() + geom_line() + 
+  geom_point(aes(x = 15, y = 62), color = 'black', size = 3) +
+  geom_hline(yintercept = upper_out_bound, color = 'red') +
+  geom_hline(yintercept = lower_out_bound, color = 'red') + 
+  ylim(c(55,100)) + xlim(c(1,24))
+```
+#15.5.1 Getting a rolling boundary
+
+So how do we deal with these patterns? One option is to make a rolling boundary that takes a ‘window’ or range of points and calculates the outlier boundary across it. So you could calculate it for say points 1 to 5, then 2 to 6, and so on. This allows you to look at how a point deviates relative to its neighbors rather than the whole dataset.
+
+A quick loop can calculate a rolling outlier boundary for our temperatures. In this case it calculates the boundary +/- 2 points around the point of interest. As a result you don’t get boundaries around the start and end of the line.
+
+```{r}
+for(i in 1:(nrow(df)-4)) {
+  lower <- i
+  upper <- i + 4
+  boundary_index <- i + 2
+  window_vals <- df[lower:upper,'temperature_day']
+  lower_out_bound <- quantile(window_vals)[2] - IQR(window_vals)*1.5
+  df[boundary_index, 'lower_out_bound'] <- lower_out_bound
+}
+```
+
+```{r}
+ggplot(df,
+       aes(x = hour, y = temperature_day)) +
+  geom_point() + geom_line() + 
+  geom_line(aes(x = hour, y = lower_out_bound), color = 'red') +
+  geom_point(aes(x = 15, y = 62), color = 'red', size = 3)+
+  ylim(c(55,100)) + xlim(c(1,24))
+```
+#15.5.2 Removing the trend
+
+Another way we can deal with is instead by ‘removing’ the trend. What I mean by this is you can fit a model that predicts the trend and then subtract that from he true value. The easiest way to do this is with a LOESS model (locally estimated scatterplot smoothing), which is sometimes known as local regression.
+```{r}
+loess_mod <- loess(temperature_day ~ hour, data = df, span = 0.5)
+df$loess_trend <- predict(loess_mod)
+```
+
+
+```{r}
+df$remainder <- df$temperature_day - df$loess_trend
+
+ggplot(df,
+       aes(x = hour, y = remainder)) +
+  geom_point() + geom_line() 
+```
+```{r}
+
+```
+
+
+```{r}
+lower_out_bound <- quantile(df$remainder)[2] - IQR(df$remainder)*1.5
+
+ggplot(df,
+       aes(x = hour, y = remainder)) +
+  geom_point() + geom_line() + 
+  geom_point(aes(x = 15, y = remainder[15]), color = 'red', size = 3) +
+  geom_hline(yintercept = lower_out_bound, color = 'red') 
+```
+# 15.6 Working with some real data
+
+```{r}
+rides <- read_csv("https://docs.google.com/spreadsheets/d/1TICJaz0ZBIoc3TqF_xAJjODIZ0rbTUh2YMd4NBW0p0Q/gviz/tq?tqx=out:csv")
+dim(rides)
+head(rides)
+```
+
+```{r}
+ggplot(rides,
+       aes(x = day, y = num_rides)) +
+  geom_point() + geom_line()
+```
+
+
+```{r}
+ggplot(rides,
+       aes(x = day, y = num_rides)) +
+  geom_point() + geom_line() + geom_smooth(method = 'lm')
+## `geom_smooth()` using formula 'y ~ x'
+```
+15.6.2 Decomposing our time series
+
+```{r}
+#install.packages("anomalize")
+library(anomalize)
+rides_decomp <- rides %>%
+  time_decompose(num_rides, method = 'stl', frequency = '7 days', trend = '1 months')
+rides_decomp
+```
+
+
+```{r}
+ggplot(rides_decomp,
+       aes(x = day, y = remainder)) +
+  geom_point() + geom_line()
+```
+
+```{r}
+rides_anom <- rides_decomp %>%
+  anomalize(remainder, method = 'gesd', alpha = 0.05, max_anoms = 0.2)
+rides_anom
+```
+
+
+```{r}
+ggplot(rides_anom,
+       aes(x = day, y = remainder)) +
+  geom_line(color = 'blue', alpha = 0.2) +
+  geom_line(aes(x = day, y = remainder_l1), color = 'red') +
+  geom_line(aes(x = day, y = remainder_l2), color = 'red') +
+  geom_point(aes(x = day, y = remainder, color = anomaly))
+```
+Our anomaly package actually has a nice built-in plotting function to show how exactly the data was decomposed and what points are anomalies. We can see the observed plot which shows the raw data. We can then see the effects of season and trend. Finally we can see the remainder plot, which is the same plot I made above.
+
+```{r}
+rides_anom %>% plot_anomaly_decomposition()
+```
+
+What days were considered to be anomalies? Let’s look at a quick filter.
+```{r}
+rides_anom %>% filter(anomaly == 'Yes')
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+```{r}
+```
+

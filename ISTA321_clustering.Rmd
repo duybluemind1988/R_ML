@@ -1,0 +1,164 @@
+---
+title: "Untitled"
+output: html_document
+---
+```{r}
+#install.packages("ggmap")
+library(dbscan)
+library(ggmap)
+library(factoextra)
+library(tidyverse)
+```
+
+
+```{r}
+ai <- read_csv("https://docs.google.com/spreadsheets/d/1jmFuMkjZ7BqUXCqJQgFVXtqkKrGRgvvnhONq3luZ38s/gviz/tq?tqx=out:csv")
+
+ai_scaled <- data.frame(scale(ai))
+head(ai_scaled)
+```
+We can use the kmeans() function to run the k-means algorithm. We also need to assign  
+k using the centers = argument. Let’s start with  k=5
+ . We also specify nstart = 20 to have R choose 20 different starting points and using the best one. Play around without it and you’ll see that you cluster assignment can jump around due to the randomness.
+
+```{r}
+ai_kmeans_scaled <- kmeans(ai_scaled, centers = 5, nstart = 20)
+
+```
+
+
+```{r}
+ai_kmeans_scaled_clusters <- factor(ai_kmeans_scaled$cluster) # extract from km_scaled object
+ai$cluster <- ai_kmeans_scaled_clusters # add back to original data frame
+
+# plot using color as cluster so it colors our points by cluster assignment
+ggplot(ai,
+       aes(x = age, y = income, color = cluster)) +
+  geom_point() 
+```
+
+14.3.3 Determining  k via the ‘elbow’ method
+
+ Smaller within-cluster sum of squares indicate that the clusters are tightly formed and thus belong together. Large within-cluster sum of squares then indicate that there is a lot of spread among points within a cluster.
+```{r}
+print(ai_kmeans_scaled$withinss) # per cluster
+## [1] 5.060892 4.516052 1.786751 3.003154 4.064999
+print(ai_kmeans_scaled$tot.withinss) # or the total across clusters
+## [1] 18.43185
+```
+
+
+```{r}
+k_means_df <- data.frame(matrix(ncol = 2, nrow = 10))
+colnames(k_means_df) <- c('k', 'wi_ss')
+for(i in 1:10) { #we'll run k from 1 to 10
+  km <- kmeans(ai_scaled, centers = i) # to run k through the range
+  wi_ss <- km$tot.withinss # get total within-cluster sum of squares
+  k_means_df[i, 'k'] <- i
+  k_means_df[i, 'wi_ss']  <- wi_ss
+}
+```
+
+
+```{r}
+ggplot(k_means_df,
+       aes(x = k, y = wi_ss)) +
+  geom_line() +
+  labs(x = 'number of clusters', y = 'total within-cluster sum of squares') +
+  theme_classic()
+```
+
+# 14.4 Density Based clustering
+
+One of the cool things about clustering is that there are lots of different methods to do it. All these methods are based off different rules as to what defines a cluster. K-means above uses a rule saying ‘whenever point is as close as possible to the nearest centroid then they’re a cluster’ as a rule. But we could also use a rule such as ‘all points that maintain a specific density of a region are a cluster.’ Under such a rule we’d only add points to a cluster if they maintained a density criteria specified by the number of points per unit space. This is density based clustering (DBSCAN) which we’ll be exploring here.
+
+#**14.5 Using DBSCAN to identify hotspots in Tucson crime.**
+
+Let’s bring in our data. I’ve filtered it down to just latitude and longitude values. I’ve removed things like traffic stops from the data and only left in more violent crimes as that’s what you’d probably care about.
+
+```{r}
+crime <- read_csv("https://docs.google.com/spreadsheets/d/1Trd7QR0owcy7crx_HkESxgsn-_yeeqDI2TnJbIfIzsY/gviz/tq?tqx=out:csv")
+crime_scaled <- data.frame(scale(crime))
+head(crime)
+```
+
+```{r}
+load(file = "north_of_campus.RData") # works for my local machine...
+fig <- ggmap(map_UA)
+fig
+```
+
+
+```{r}
+fig + geom_jitter(aes(x = longitude, y = latitude), data = crime)
+```
+#14.5.2 Applying DBSCAN
+
+We can use the dbscan() function in the dbscan package to fit the model. You just give it your features as the first argument. The minPts = argument is asking how many points at a given density are needed to start a cluster. The eps = argument is the radius you want to search. This needs to be tuned as too big of a density will turn everything into a giant cluster. Too small and you’ll have a segment up into too many clusters. It also interacts with minPts as increasing the number of points without altering the radius will increase the required density (and vice-versa)
+
+Let’s fit and look at our object. You can see that a ton of points are in cluster 0, which are all considered to be outliers. This is a perk over k-means as it allows us to remove ‘noise.’ In this case that noise are crimes that although happened, don’t fall into a hotspot.
+```{r}
+crime_db <- dbscan(crime_scaled,  minPts = 50, eps = 0.06,)
+crime_db
+```
+Let’s fit and look at our object. You can see that a ton of points are in cluster 0, which are all considered to be outliers. This is a perk over k-means as it allows us to remove ‘noise.’ In this case that noise are crimes that although happened, don’t fall into a hotspot.
+
+Let’s assign our clusters back to our original unscaled data and then remove the outliers. We’re going to make a copy of our original data as we’re going to do some filtering but will also want to cluster things again later.
+
+```{r}
+# make a copy
+crime_filtered <- crime
+
+# access cluster, make factor, add to crime
+crime_filtered$cluster  <- factor(crime_db$cluster) 
+
+# filter out cluster 0
+crime_filtered <- crime_filtered %>%
+  filter(cluster != 0)
+```
+
+
+```{r}
+head(crime_filtered, 10)
+```
+Let’s plot these clusters on the map! Each color represents a unique cluster of high crime density. ggplot only has so many colors which is why there might be the same color but in a different space. Still, what’s great about this is that we can see that crime is much denser on the west side of Grant, and gets better as you travel east.
+
+```{r}
+fig + geom_jitter(aes(x = longitude, y = latitude, color = cluster), 
+                  data = crime_filtered) + theme(legend.position = 'none')
+```
+
+We see that if we increase eps just a little bit that we get fewer clusters and most everything falls into a cluster. This is because as the algorithm search radius is much higher, thus nearly everything keeps getting added to only a few clusters.
+
+```{r}
+crime_db <- dbscan(crime_scaled,  minPts = 50, eps = 0.1,)
+crime_filtered <- crime
+crime_filtered$cluster  <- factor(crime_db$cluster) 
+crime_filtered <- crime_filtered %>%
+  filter(cluster != 0)
+fig + geom_jitter(aes(x = longitude, y = latitude, color = cluster), 
+                  data = crime_filtered) + theme(legend.position = 'none')
+```
+Now if we shrink eps to have a small radius we get back only the really high density spots of crime, and only points that are really close together will get added to a cluster.
+
+```{r}
+crime_db <- dbscan(crime_scaled,  minPts = 50, eps = 0.01,)
+crime_filtered <- crime
+crime_filtered$cluster  <- factor(crime_db$cluster) 
+crime_filtered <- crime_filtered %>%
+  filter(cluster != 0)
+fig + geom_jitter(aes(x = longitude, y = latitude, color = cluster), 
+                  data = crime_filtered) + theme(legend.position = 'none')
+```
+
+
+```{r}
+```
+
+```{r}
+```
+
+
+```{r}
+```
+
